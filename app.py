@@ -54,6 +54,15 @@ def th_time(dt: datetime) -> str:
     return dt.astimezone(TH).strftime("%d/%m %H:%M:%S")
 
 
+def until(dt: datetime, now: datetime) -> str:
+    sec = (dt - now).total_seconds()
+    if sec <= 0:
+        return "กำลังออก"
+    d, rem = divmod(int(sec), 86400)
+    h, m = divmod(rem // 60, 60)
+    return f"{d} วัน {h} ชม." if d else (f"{h} ชม. {m} นาที" if h else f"{m} นาที")
+
+
 def ago(seconds: float) -> str:
     if seconds < 90:
         return f"{seconds:.0f} วินาทีที่แล้ว"
@@ -125,31 +134,50 @@ def live() -> None:
     st.caption(f"เหลืออีก {limit + s['day_pnl']:,.2f} {cur} ก่อนถึงลิมิตขาดทุนรายวัน (${limit:g}) · "
                f"ราคาล่าสุด Bid {s.get('bid', 0):,.2f} / Ask {s.get('ask', 0):,.2f}")
 
-    # ---------- ไม้ที่เปิด + สิ่งที่บอทรอ + ข่าว ----------
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        st.subheader("ไม้ที่เปิดอยู่")
-        if s.get("positions"):
-            for p in s["positions"]:
-                color = "green" if p["side"] == "BUY" else "red"
-                st.markdown(f":{color}-badge[{p['side']}] **{p['volume']} lot** @ {p['price_open']:,.2f} → "
-                            f"{p['price_current']:,.2f} · SL {p['sl']:,.2f} · "
-                            f"**{p['profit']:+,.2f} {cur}**  \nเปิด {p['open_time']} · เหตุผล: {p['entry_reason'] or '-'}")
-        else:
-            st.markdown("ไม่มีไม้ที่เปิดอยู่")
-        if s.get("armed"):
-            st.info(f"รอเข้า **{'BUY' if s['armed'] == 1 else 'SELL'}** — สัญญาณเกิดเมื่อ {s.get('armed_at')} "
-                    "แต่ยังติดเงื่อนไข (ADX/ข่าว/ลิมิต) ดูเหตุผลใน Log ด้านล่าง")
-        st.caption(f"เวลาเซิร์ฟเวอร์ MT5 {s.get('server_time')} · แท่งล่าสุดที่บอทประมวลผล {s.get('last_bar')}")
-    with c2:
-        st.subheader("ข่าวสำคัญถัดไป")
-        news = s.get("upcoming_news") or []
-        if news:
-            st.dataframe(pd.DataFrame(news).rename(columns={"time": "เวลาเซิร์ฟเวอร์", "event": "ข่าว"}),
-                         hide_index=True, width="stretch")
-        else:
-            st.markdown("ไม่มีข้อมูลปฏิทินข่าว")
+    # ---------- ไม้ที่เปิด + สิ่งที่บอทรอ ----------
+    st.subheader("ไม้ที่เปิดอยู่")
+    if s.get("positions"):
+        for p in s["positions"]:
+            color = "green" if p["side"] == "BUY" else "red"
+            st.markdown(f":{color}-badge[{p['side']}] **{p['volume']} lot** @ {p['price_open']:,.2f} → "
+                        f"{p['price_current']:,.2f} · SL {p['sl']:,.2f} · "
+                        f"**{p['profit']:+,.2f} {cur}**  \nเปิด {p['open_time']} · เหตุผล: {p['entry_reason'] or '-'}")
+    else:
+        st.markdown("ไม่มีไม้ที่เปิดอยู่")
+    if s.get("armed"):
+        st.info(f"รอเข้า **{'BUY' if s['armed'] == 1 else 'SELL'}** — สัญญาณเกิดเมื่อ {s.get('armed_at')} "
+                "แต่ยังติดเงื่อนไข (ADX/ข่าว/ลิมิต) ดูเหตุผลใน Log ด้านล่าง")
+    st.caption(f"เวลาเซิร์ฟเวอร์ MT5 {s.get('server_time')} · แท่งล่าสุดที่บอทประมวลผล {s.get('last_bar')}")
 
+    # ---------- ข่าวเศรษฐกิจ ----------
+    st.subheader("ข่าวเศรษฐกิจสหรัฐที่มีผลกับทอง")
+    upcoming = s.get("upcoming_news") or []
+    if upcoming and "thai" in upcoming[0]:
+        nxt = upcoming[0]
+        note = f" · บอทงดเปิดไม้ใหม่ {nxt['block_th']} น." if cfg.get("news_filter") else ""
+        st.info(f"**ข่าวถัดไป: {nxt['thai']}** — {nxt['time_th']} น. (อีก {until(nxt['time_utc'], now)})"
+                + (f" · คาด {nxt['forecast']} / ครั้งก่อน {nxt['previous']}" if nxt["forecast"] else "") + note)
+        st.dataframe(pd.DataFrame([{
+            "เวลาไทย": u["time_th"], "อีก": until(u["time_utc"], now), "ข่าว": u["thai"], "ชื่อ MT5": u["event"],
+            "คาดการณ์": u["forecast"], "ครั้งก่อน": u["previous"], "ผลต่อทอง": u["hint"],
+            **({"งดเข้าไม้": u["block_th"]} if cfg.get("news_filter") else {}),
+        } for u in upcoming]), hide_index=True, width="stretch")
+    elif upcoming:  # ข้อมูลรูปแบบเก่าจากบอทเวอร์ชันก่อน
+        st.dataframe(pd.DataFrame(upcoming).rename(columns={"time": "เวลาเซิร์ฟเวอร์", "event": "ข่าว"}),
+                     hide_index=True, width="stretch")
+    else:
+        st.caption("ไม่มีข้อมูลปฏิทินข่าว")
+
+    recent = s.get("recent_news") or []
+    if recent:
+        st.markdown("**ข่าวที่เพิ่งออก (3 วันล่าสุด)**")
+        st.dataframe(pd.DataFrame([{
+            "เวลาไทย": r["time_th"], "ข่าว": r["thai"], "จริง": r["actual"], "คาด": r["forecast"],
+            "ครั้งก่อน": r["previous"], "ผลเทียบคาด": r["verdict"], "ตามหลักทั่วไป": r["bias"],
+            "ทองขยับจริง 1 ชม.": (f"{r['gold_move_1h']:+,.2f} $" if r.get("gold_move_1h") is not None else ""),
+        } for r in recent]), hide_index=True, width="stretch")
+        st.caption("\"ตามหลักทั่วไป\" คือทิศที่ทองมักไปเมื่อตัวเลขต่างจากคาด (เช่น เงินเฟ้อสูงกว่าคาด → ดอลลาร์แข็ง → "
+                   "ทองมักลง) แต่ตลาดอาจไม่ตามเสมอ — ดูช่อง \"ทองขยับจริง\" ประกอบ")
     # ---------- กราฟ equity ----------
     since = now - timedelta(days=days)
     eq = pd.DataFrame(list(db.equity.find({"bot_id": bot_id, "time": {"$gte": since}},
@@ -160,7 +188,7 @@ def live() -> None:
         long = eq.melt("time", ["balance", "equity"], var_name="series", value_name="usd")
         chart = alt.Chart(long).mark_line(strokeWidth=2).encode(
             x=alt.X("time:T", title=None),
-            y=alt.Y("usd:Q", title=None, scale=alt.Scale(zero=False)),  # ไม่เริ่มที่ 0 — ไม่งั้นเส้นแบนจนมองไม่เห็นการขยับ
+            y=alt.Y("usd:Q", title=None, scale=alt.Scale(zero=False), axis=alt.Axis(format=",.0f")),  # ไม่เริ่มที่ 0 — ไม่งั้นเส้นแบนจนมองไม่เห็นการขยับ
             color=alt.Color("series:N", scale=alt.Scale(domain=["balance", "equity"], range=["#8a919c", "#d4a017"]),
                             legend=alt.Legend(orient="bottom", title=None)),
             tooltip=[alt.Tooltip("time:T", title="เวลาไทย", format="%d/%m %H:%M"), alt.Tooltip("series:N", title=""),
