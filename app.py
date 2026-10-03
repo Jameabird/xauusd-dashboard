@@ -14,6 +14,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from pymongo import DESCENDING, MongoClient
+from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
 
 TH = timezone(timedelta(hours=7))
 OFFLINE_AFTER_S = 60  # บอทอัปเดตทุก ~10 วิ ถ้าเงียบเกินนี้ถือว่าหยุด/คอมดับ/เน็ตหลุด
@@ -69,7 +70,18 @@ if not secret("MONGODB_URI"):
     st.stop()
 db = get_db()
 
-bot_ids = [d["_id"] for d in db.status.find({}, {"_id": 1})]
+try:
+    bot_ids = [d["_id"] for d in db.status.find({}, {"_id": 1})]
+except OperationFailure as e:
+    if e.code in (18, 8000):  # AuthenticationFailed (Atlas ส่ง 8000 "bad auth")
+        st.error("ล็อกอิน MongoDB ไม่ผ่าน — ชื่อ user หรือรหัสใน MONGODB_URI (Secrets) ไม่ตรงกับใน Atlas "
+                 "(Database Access) เช็คว่าแทนที่ <db_password> แล้ว ไม่มี < > เหลืออยู่ และ user ถูกสร้างเสร็จแล้ว")
+    else:
+        st.error(f"user นี้ไม่มีสิทธิ์อ่านข้อมูล (code {e.code}) — ใน Atlas ให้ role 'Only read any database'")
+    st.stop()
+except ServerSelectionTimeoutError:
+    st.error("ต่อ MongoDB ไม่ได้ — เช็ค Network Access ใน Atlas ว่ามี 0.0.0.0/0 และ host ใน MONGODB_URI ถูกต้อง")
+    st.stop()
 if not bot_ids:
     st.info("ยังไม่มีข้อมูลจากบอท — รัน bot.py ที่มี MONGODB_URI ใน .env แล้วรอสักครู่")
     st.stop()
