@@ -26,6 +26,8 @@ CALENDAR_STALE_MIN = 180
 MAX_PIN_TRIES = 5
 UP, DOWN, GOLD, MA_FAST, MA_SLOW, MUTED = "#3cc08e", "#f0675c", "#d4a017", "#6b9cff", "#a3aab6", "#8a919c"
 ACTIONS = {
+    "follow_trend": ("📈 เข้าตามเทรนด์ตอนนี้", "เข้าตามทิศ MA ปัจจุบันทันที ไม่ต้องรอ MA ตัดใหม่ — ยังผ่าน ADX / ข่าว / ลิมิต "
+                     "และมี SL เหมือนปกติ ถ้าตอนนี้ติดเงื่อนไข บอทจะรอเข้าเองตอนแท่งปิด"),
     "pause": ("⏸ หยุดเข้าไม้ใหม่", "บอทจะไม่เปิดไม้ใหม่ ไม้ที่ถืออยู่ยังมี SL และออกตามสัญญาณปกติ"),
     "resume": ("▶ กลับมาเข้าไม้ตามปกติ", "บอทกลับมาเปิดไม้ตามสัญญาณ"),
     "close_all": ("⛔ ปิดทุกไม้ + หยุดเข้าไม้", "ปิดไม้ของบอททั้งหมดที่ราคาตลาดทันที แล้วหยุดเข้าไม้ใหม่"),
@@ -129,11 +131,12 @@ def control_panel() -> None:
     if tries >= MAX_PIN_TRIES:
         sb.error("ใส่ PIN ผิดเกินกำหนด — โหลดหน้าใหม่เพื่อลองอีกครั้ง")
         return
-    action = sb.radio("คำสั่ง", list(ACTIONS), format_func=lambda a: ACTIONS[a][0], key="ctl_action")
-    sb.caption(ACTIONS[action][1])
+    action = sb.radio("คำสั่ง", list(ACTIONS), format_func=lambda a: ACTIONS[a][0], key="ctl_action", index=None)
+    if action:
+        sb.caption(ACTIONS[action][1])
     pin = sb.text_input("PIN", type="password", key="ctl_pin")
     confirm = sb.checkbox("ยืนยันส่งคำสั่งนี้", key="ctl_confirm")
-    if sb.button("ส่งคำสั่ง", type="primary", disabled=not confirm, width="stretch"):
+    if sb.button("ส่งคำสั่ง", type="primary", disabled=not (confirm and action), width="stretch"):
         if not hmac.compare_digest(pin.encode(), pin_cfg.encode()):
             st.session_state.pin_fail = tries + 1
             sb.error(f"PIN ไม่ถูกต้อง ({tries + 1}/{MAX_PIN_TRIES})")
@@ -142,15 +145,22 @@ def control_panel() -> None:
             get_db("MONGODB_CONTROL_URI").commands.insert_one({
                 "bot_id": bot_id, "action": action, "status": "pending",
                 "created_at": datetime.now(timezone.utc), "requested_by": "dashboard"})
-            sb.success("ส่งคำสั่งแล้ว — บอทจะทำภายใน ~15 วินาที (ดูสถานะด้านล่าง)")
+            sb.success("ส่งคำสั่งแล้ว — บอทจะทำภายใน ~2 วินาที (ดูสถานะด้านล่าง)")
         except PyMongoError as e:
             sb.error(f"ส่งคำสั่งไม่ได้: {type(e).__name__} — เช็คสิทธิ์ของ user ใน MONGODB_CONTROL_URI")
+    with sb:
+        command_status()
+
+
+@st.fragment(run_every="2s")
+def command_status() -> None:
+    """สถานะคำสั่งล่าสุด รีเฟรชเองทุก 2 วินาที (แยกจากส่วนอื่น จะได้ไม่ล้าง PIN ที่พิมพ์อยู่)"""
     cmds = list(db.commands.find({"bot_id": bot_id}).sort("created_at", DESCENDING).limit(5))
     if cmds:
         icon = {"pending": "🕓", "received": "⚙️", "done": "✅", "error": "⛔", "expired": "⌛"}
-        sb.caption("คำสั่งล่าสุด")
+        st.caption("คำสั่งล่าสุด")
         for c in cmds:
-            sb.markdown(f"{icon.get(c['status'], '•')} {th_time(c['created_at'])} **{ACTIONS.get(c['action'], (c['action'],))[0]}**"
+            st.markdown(f"{icon.get(c['status'], '•')} {th_time(c['created_at'])} **{ACTIONS.get(c['action'], (c['action'],))[0]}**"
                         + (f"  \n<small>{c.get('result', '')}</small>" if c.get("result") else ""), unsafe_allow_html=True)
 
 
