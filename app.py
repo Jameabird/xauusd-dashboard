@@ -166,6 +166,7 @@ def header(s: dict, now: datetime) -> None:
     left.title(f"{s.get('symbol', 'XAUUSD')} Bot")
     left.caption(f"{s.get('server')} · login {s.get('login')} · {cfg.get('timeframe')} "
                  f"MA{cfg.get('fast')}/{cfg.get('slow')} · SL {cfg.get('sl_atr')}×ATR · ADX ≥ {cfg.get('adx_min')} · "
+                 + (f"เสี่ยง {cfg['risk_pct']}%/ไม้ (สูงสุด {cfg.get('max_lot')} lot) · " if cfg.get("risk_pct") else "")
                  + (f"บล็อกข่าว {cfg.get('news_set')} ±{cfg.get('news_before')} นาที" if cfg.get("news_filter") else "ไม่กรองข่าว"))
     if online:
         right.markdown(f"### :green-badge[● ONLINE]" + (" :orange-badge[⏸ หยุดเข้าไม้]" if s.get("paused") else "")
