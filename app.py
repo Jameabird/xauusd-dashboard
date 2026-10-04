@@ -37,7 +37,7 @@ st.set_page_config(page_title="XAUUSD Bot", page_icon="📈", layout="wide")
 # ---------- ตัวช่วย ----------
 def secret(name: str, default: str = "") -> str:
     try:
-        return st.secrets[name]
+        return str(st.secrets[name]).strip()  # str(): รองรับ PIN ที่ใส่เป็นตัวเลขไม่มี "..." ใน TOML
     except Exception:
         return os.getenv(name, default)
 
