@@ -119,9 +119,11 @@ def control_panel() -> None:
     sb.divider()
     sb.subheader("ควบคุมบอท")
     pin_cfg, ctrl_uri = secret("CONTROL_PIN"), secret("MONGODB_CONTROL_URI")
-    if not pin_cfg or not ctrl_uri:
-        sb.caption("ปิดอยู่ — ตั้ง MONGODB_CONTROL_URI (user ที่เขียนได้เฉพาะ db xauusd_bot) และ CONTROL_PIN "
-                   "ใน Secrets เพื่อเปิดใช้")
+    if not pin_cfg or not ctrl_uri or "รหัส" in ctrl_uri or "<" in ctrl_uri:
+        missing = [n for n, ok in (("MONGODB_CONTROL_URI", ctrl_uri and "รหัส" not in ctrl_uri and "<" not in ctrl_uri),
+                                   ("CONTROL_PIN", pin_cfg)) if not ok]
+        sb.caption("ปิดอยู่ — ใน Secrets ยังขาด/ยังไม่ได้ใส่รหัสจริง: **" + ", ".join(missing) + "**  \n"
+                   "(MONGODB_CONTROL_URI = user ที่เขียนได้เฉพาะ db xauusd_bot, CONTROL_PIN = PIN ที่ตั้งเอง)")
         return
     tries = st.session_state.get("pin_fail", 0)
     if tries >= MAX_PIN_TRIES:
