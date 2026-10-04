@@ -94,7 +94,11 @@ if not secret("MONGODB_URI"):
     st.stop()
 db = get_db("MONGODB_URI")
 try:
-    bot_ids = [d["_id"] for d in db.status.find({}, {"_id": 1})]
+    _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1}))
+    bot_ids = [d["_id"] for d in _st]
+    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)"}
+    bot_labels = {d["_id"]: f"{PROFILE_NAMES.get(d.get('profile', 'main'), d.get('profile', 'main'))} · "
+                            f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
     if e.code in (18, 8000):  # AuthenticationFailed (Atlas ส่ง 8000 "bad auth")
         st.error("ล็อกอิน MongoDB ไม่ผ่าน — ชื่อ user หรือรหัสใน MONGODB_URI (Secrets) ไม่ตรงกับใน Atlas "
@@ -109,7 +113,7 @@ if not bot_ids:
     st.info("ยังไม่มีข้อมูลจากบอท — รัน bot.py ที่มี MONGODB_URI ใน .env แล้วรอสักครู่")
     st.stop()
 
-bot_id = st.sidebar.selectbox("บอท (login-magic)", bot_ids) if len(bot_ids) > 1 else bot_ids[0]
+bot_id = st.sidebar.selectbox("บอท", bot_ids, format_func=lambda i: bot_labels.get(i, i)) if len(bot_ids) > 1 else bot_ids[0]
 days = st.sidebar.select_slider("กราฟ equity ย้อนหลัง", options=[1, 7, 30, 90, 365], value=30,
                                 format_func=lambda d: f"{d} วัน")
 n_bars = st.sidebar.select_slider("กราฟราคา (จำนวนแท่ง)", options=[60, 120, 200, 300], value=120)
