@@ -501,13 +501,63 @@ def log_tab() -> None:
         st.caption("ยังไม่มี log")
 
 
+def market_tab(now: datetime) -> None:
+    c = db.context.find_one({"_id": bot_id})
+    if not c:
+        st.caption("ยังไม่มีข้อมูลสภาพตลาด — บอทเวอร์ชันใหม่จะดึงทุก 20 นาทีหลังเริ่มรัน")
+        return
+    st.caption(f"อัปเดต {ago((now - c['updated_at']).total_seconds())} · ข้อมูลประกอบการดูเท่านั้น "
+               "บอทไม่ได้ใช้ตัดสินใจเข้า/ออกไม้ (งานวิจัยพบว่าตัวกรองพวกนี้ไม่ได้ทำให้ผลดีขึ้น)")
+    m = st.columns(5)
+    vix, dxy, us10y, ry, cot = (c.get(k) or {} for k in ("vix", "dxy", "us10y", "real_yield", "cot"))
+    if vix:
+        m[0].metric(f"VIX ความกลัว · {vix.get('label', '')}", f"{vix['last']:.2f}", f"{vix['change']:+.2f}",
+                    delta_color="inverse")
+    if dxy:
+        m[1].metric("ดัชนีดอลลาร์ (DXY)", f"{dxy['last']:.2f}", f"{dxy['change_pct']:+.2f}%", delta_color="inverse")
+    if us10y:
+        m[2].metric("พันธบัตร 10 ปี", f"{us10y['last']:.2f}%", f"{us10y['change']:+.3f}", delta_color="inverse")
+    if ry:
+        m[3].metric("Real yield 10 ปี", f"{ry['last']:.2f}%", f"{ry['change']:+.2f}" if ry.get("change") is not None else None,
+                    delta_color="inverse")
+    if cot:
+        m[4].metric("กองทุนถือ long สุทธิ (COT)", f"{cot['net_pct']:.1f}% ของ OI", f"{cot['change_pct']:+.1f} จุด",
+                    delta_color="off", delta_arrow="off")
+    reads = []
+    if vix:
+        reads.append(f"**ความกลัว:** VIX {vix['last']:.1f} = {vix.get('label')} "
+                     + ("— ตลาดกังวล นักลงทุนมักหนีเข้าทอง" if vix["last"] >= 20 else "— ไม่มีแรงหนีเข้าทองพิเศษ"))
+    if dxy:
+        reads.append(f"**ดอลลาร์:** {'แข็งขึ้น' if dxy['change'] > 0 else 'อ่อนลง'} {abs(dxy['change_pct']):.2f}% "
+                     + ("→ มักกดดันทอง" if dxy["change"] > 0 else "→ มักหนุนทอง"))
+    if us10y:
+        reads.append(f"**ดอกเบี้ยพันธบัตร:** {'ขึ้น' if us10y['change'] > 0 else 'ลง'} "
+                     + ("→ ถือทองมีต้นทุนค่าเสียโอกาสสูงขึ้น มักกดดันทอง" if us10y["change"] > 0 else "→ มักหนุนทอง"))
+    if cot:
+        crowd = "สูงกว่าปกติมาก (ถือแน่น)" if cot["rank_3y"] >= 80 else "ต่ำกว่าปกติมาก" if cot["rank_3y"] <= 20 else "ระดับปกติ"
+        reads.append(f"**กองทุน:** ถือ long สุทธิ {cot['net_pct']:.1f}% ของสัญญาทั้งหมด — {crowd} "
+                     f"(สูงกว่า {cot['rank_3y']}% ของ 3 ปีที่ผ่านมา, ข้อมูลวันที่ {cot['date']})")
+    if reads:
+        with st.container(border=True):
+            st.markdown("**อ่านตลาดแบบเร็ว** (ทิศที่ \"มัก\" เกิด ไม่ได้เกิดทุกครั้ง)  \n" + "  \n".join(f"• {r}" for r in reads))
+    st.subheader("พาดหัวข่าวทองล่าสุด")
+    heads = c.get("headlines") or []
+    if heads:
+        for h in heads:
+            st.markdown(f"**{h['source']}** · {ago((now - h['time_utc']).total_seconds())} — [{h['title']}]({h['link']})")
+    else:
+        st.caption("ดึงพาดหัวข่าวไม่ได้รอบนี้")
+    if c.get("errors"):
+        st.caption("แหล่งที่ดึงไม่ได้รอบล่าสุด: " + ", ".join(c["errors"]))
+
+
 @st.fragment(run_every="15s")
 def live() -> None:
     s = db.status.find_one({"_id": bot_id})
     now = datetime.now(timezone.utc)
     header(s, now)
     trades = load_trades()
-    t1, t2, t3, t4, t5 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "ผลงาน", "Log"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "Log"])
     with t1:
         overview_tab(s, now)
     with t2:
@@ -515,8 +565,10 @@ def live() -> None:
     with t3:
         news_tab(s, now)
     with t4:
-        performance_tab(s, trades)
+        market_tab(now)
     with t5:
+        performance_tab(s, trades)
+    with t6:
         log_tab()
 
 
