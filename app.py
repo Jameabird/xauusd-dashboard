@@ -2,9 +2,8 @@
 Dashboard บอท XAUUSD — อ่านข้อมูลที่ bot.py ส่งขึ้น MongoDB (ดู monitor.py)
 
 รันในเครื่อง:   streamlit run dashboard/app.py   (อ่านค่าจาก env หรือ .streamlit/secrets.toml)
-ขึ้นออนไลน์:     Streamlit Community Cloud → Secrets:
+ขึ้นออนไลน์:     Streamlit Community Cloud (เปิดดูได้ทุกคนที่มีลิงก์ — ปุ่มควบคุมยังต้องใช้ PIN) → Secrets:
                   MONGODB_URI = "mongodb://dashboard_reader:...@.../"      (user อ่านอย่างเดียว)
-                  DASHBOARD_PASSWORD = "..."                                (ไม่บังคับ ถ้าตั้งแอปเป็น private แล้ว)
                   # ปุ่มควบคุมบอท (ไม่บังคับ):
                   MONGODB_CONTROL_URI = "mongodb://dashboard_control:...@.../"  (readWrite เฉพาะ db xauusd_bot)
                   CONTROL_PIN = "..."
@@ -41,21 +40,6 @@ def secret(name: str, default: str = "") -> str:
         return st.secrets[name]
     except Exception:
         return os.getenv(name, default)
-
-
-def require_password() -> None:
-    pw = secret("DASHBOARD_PASSWORD")
-    if not pw or st.session_state.get("authed"):
-        return
-    st.title("XAUUSD Bot")
-    with st.form("login"):
-        entered = st.text_input("รหัสผ่าน", type="password")
-        if st.form_submit_button("เข้าสู่ระบบ"):
-            if hmac.compare_digest(entered.encode(), pw.encode()):
-                st.session_state.authed = True
-                st.rerun()
-            st.error("รหัสผ่านไม่ถูกต้อง")
-    st.stop()
 
 
 @st.cache_resource
@@ -103,7 +87,6 @@ def streak(signs: list[bool], value: bool) -> int:
 
 
 # ---------- เชื่อมต่อ ----------
-require_password()
 if not secret("MONGODB_URI"):
     st.error("ยังไม่ได้ตั้ง MONGODB_URI — ใส่ใน Secrets ของ Streamlit หรือ environment variable")
     st.stop()
