@@ -1,4 +1,5 @@
-streamlit>=1.45
+streamlit>=1.60
 pymongo
 pandas
 altair
+tzdata
