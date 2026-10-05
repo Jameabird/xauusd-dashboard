@@ -104,7 +104,7 @@ try:
     def _pname(prof: str) -> str:
         acct, base = ("Exness · ", prof[3:]) if prof.startswith("ex-") else ("", prof)
         return acct + PROFILE_NAMES.get(base, base)
-    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)"}
+    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)", "m15b": "m15b · breakout M15 (ทดสอบ)"}
     bot_labels = {d["_id"]: f"{_pname(d.get('profile', 'main'))} · "
                             f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
@@ -585,7 +585,7 @@ def market_tab(now: datetime) -> None:
 def load_all_trades() -> list[dict]:
     return list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "open_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1,
                                     "entry_price": 1, "exit_price": 1, "exit_reason": 1, "lot": 1, "sl": 1, "tier": 1, "tp_usd": 1,
-                                    "spread_pts": 1, "slippage_pts": 1, "ticket": 1}))
+                                    "spread_pts": 1, "slippage_pts": 1, "ticket": 1, "features": 1}))
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -628,6 +628,16 @@ def trade_frame() -> pd.DataFrame:
     df["ที่มา"] = df["source"].fillna("signal")
     df["ปิดโดย"] = np.where(df["exit_reason"].astype(str).str.contains("มือ|สั่งปิด|dashboard", regex=True), "ปิดมือ", "บอท (SL/TP/สัญญาณ)")
     df["win"] = df["กำไร $"] > 0
+    # ตัวแปร indicator ตอนเข้าไม้ (JSON ใน features) → คอลัมน์สำคัญ ๆ
+    import json as _json
+    def _feat(x, k):
+        try:
+            return _json.loads(x).get(k) if isinstance(x, str) and x else np.nan
+        except Exception:
+            return np.nan
+    if "features" in df:
+        for k in ("rsi14", "adx", "bb_pctb", "range_pos_100_side", "macd_hist_atr", "atr_rank200", "spread_atr", "hour_utc"):
+            df[f"f_{k}"] = df["features"].map(lambda x, k=k: _feat(x, k))
     prof_by_bot = {d["_id"]: str(d.get("profile") or "main") for d in _st}
     df["โปรไฟล์"] = df["bot_id"].map(lambda i: prof_by_bot.get(i, "main")).str.replace("^ex-", "", regex=True)
     pt = np.where(df["โบรกเกอร์"] == "Exness", 0.001, 0.01)
@@ -775,9 +785,12 @@ def journal_section(df: pd.DataFrame) -> None:
     m = st.columns(5)
     m[0].metric("จำนวนไม้", len(v)); m[1].metric("กำไรสุทธิ", f"{v['กำไร $'].sum():+,.2f}"); m[2].metric("ชนะ", f"{(v['กำไร $'] > 0).mean():.0%}")
     m[3].metric("เฉลี่ย/ไม้", f"{v['กำไร $'].mean():+.2f}"); m[4].metric("Profit factor", f"{gw / gl:.2f}" if gl else "–")
-    cols = ["ปิดเมื่อ", "บอท", "side", "lot", "entry_price", "exit_price", "กำไร $", "R", "ถือ (นาที)", "ปิดโดย", "exit_reason", "ที่มา", "tier", "tp_usd", "spread $", "slip $", "โบรกเกอร์"]
+    cols = ["ปิดเมื่อ", "บอท", "side", "lot", "entry_price", "exit_price", "กำไร $", "R", "ถือ (นาที)", "ปิดโดย", "exit_reason", "ที่มา", "tier", "tp_usd", "spread $", "slip $", "โบรกเกอร์",
+            "f_rsi14", "f_adx", "f_bb_pctb", "f_range_pos_100_side", "f_macd_hist_atr", "f_atr_rank200", "f_spread_atr", "f_hour_utc"]
     st.dataframe(v.sort_values("ปิดเมื่อ", ascending=False)[[c for c in cols if c in v]].rename(columns={"side": "ด้าน", "entry_price": "ราคาเข้า", "exit_price": "ราคาออก",
-                 "exit_reason": "เหตุผลปิด"}), width="stretch", hide_index=True)
+                 "exit_reason": "เหตุผลปิด", "f_rsi14": "RSI", "f_adx": "ADX", "f_bb_pctb": "BB %B", "f_range_pos_100_side": "ตำแหน่งในช่วง100(ตามทิศ)",
+                 "f_macd_hist_atr": "MACD hist/ATR", "f_atr_rank200": "ATR rank", "f_spread_atr": "spread/ATR", "f_hour_utc": "ชั่วโมง UTC"}), width="stretch", hide_index=True)
+    st.caption("คอลัมน์ RSI→ชั่วโมง UTC คือตัวแปร indicator ตอนเข้าไม้ (เริ่มบันทึกตั้งแต่เวอร์ชันนี้) · วิเคราะห์ความสัมพันธ์กับกำไรด้วย tools/feature_report.py")
     st.markdown("**ปิดมือ vs บอทปิดเอง (ตามตัวกรองด้านบน)**")
     comp = v.groupby("ปิดโดย").agg(ไม้=("กำไร $", "size"), กำไรสุทธิ=("กำไร $", "sum"), เฉลี่ยต่อไม้=("กำไร $", "mean"), ชนะ=("กำไร $", lambda x: (x > 0).mean() * 100),
                                    ถือเฉลี่ย_นาที=("ถือ (นาที)", "mean")).round(2)
