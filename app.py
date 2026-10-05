@@ -98,7 +98,7 @@ db = get_db("MONGODB_URI")
 try:
     _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1}))
     bot_ids = [d["_id"] for d in _st]
-    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)"}
+    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4"}
     bot_labels = {d["_id"]: f"{PROFILE_NAMES.get(d.get('profile', 'main'), d.get('profile', 'main'))} · "
                             f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
