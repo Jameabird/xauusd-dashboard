@@ -30,6 +30,8 @@ ACTIONS = {
                      "และมี SL เหมือนปกติ ถ้าตอนนี้ติดเงื่อนไข บอทจะรอเข้าเองตอนแท่งปิด"),
     "pause": ("⏸ หยุดเข้าไม้ใหม่", "บอทจะไม่เปิดไม้ใหม่ ไม้ที่ถืออยู่ยังมี SL และออกตามสัญญาณปกติ"),
     "resume": ("▶ กลับมาเข้าไม้ตามปกติ", "บอทกลับมาเปิดไม้ตามสัญญาณ"),
+    "reset": ("🔄 รีเซ็ตเงื่อนไข", "ล้างสัญญาณที่รอเข้า (armed) + สิทธิ์ re-entry และกลับมาเข้าไม้ปกติ — ไม้ที่เปิดอยู่ไม่ถูกแตะ "
+                "บอทจะรอสัญญาณ MA ตัดครั้งใหม่"),
     "close_all": ("⛔ ปิดทุกไม้ + หยุดเข้าไม้", "ปิดไม้ของบอททั้งหมดที่ราคาตลาดทันที แล้วหยุดเข้าไม้ใหม่"),
 }
 
@@ -387,13 +389,13 @@ def live_vs_backtest(s: dict, trades: pd.DataFrame) -> None:
     sample = np.array(exp.get("r_sample") or [], dtype=float)
     live = trades["r_multiple"].dropna().to_numpy() if not trades.empty else np.array([])
     n = len(live)
-    if not len(sample):
-        st.caption("ยังไม่มีข้อมูล backtest ให้เทียบ (รัน backtest.py แล้วรีสตาร์ทบอท)")
+    if not len(sample) or exp.get("avg_r") is None:
+        st.caption("บอทนี้ยังไม่มีข้อมูล backtest ให้เทียบ (เช่น โปรไฟล์ทดลอง)")
         return
     c = st.columns(3)
-    c[0].metric("R เฉลี่ยต่อไม้", f"{live.mean():+.2f}R" if n else "–", f"backtest {exp.get('avg_r', 0):+.2f}R",
+    c[0].metric("R เฉลี่ยต่อไม้", f"{live.mean():+.2f}R" if n else "–", f"backtest {exp.get('avg_r') or 0:+.2f}R",
                 delta_color="off", delta_arrow="off")
-    c[1].metric("อัตราชนะ", f"{(live > 0).mean() * 100:.0f}%" if n else "–", f"backtest {exp.get('win_rate', 0):.0f}%",
+    c[1].metric("อัตราชนะ", f"{(live > 0).mean() * 100:.0f}%" if n else "–", f"backtest {exp.get('win_rate') or 0:.0f}%",
                 delta_color="off", delta_arrow="off")
     c[2].metric("จำนวนไม้", f"{n}", f"backtest ~{exp.get('trades_per_year')} ไม้/ปี", delta_color="off", delta_arrow="off")
     horizon = max(n, 20)
