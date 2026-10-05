@@ -557,6 +557,85 @@ def market_tab(now: datetime) -> None:
         st.caption("แหล่งที่ดึงไม่ได้รอบล่าสุด: " + ", ".join(c["errors"]))
 
 
+def journal_tab() -> None:
+    """ไม้เปิดอยู่ของทุกบอท · กำไรสะสมรวมทีม · สมุดบันทึกไม้ (กรองได้) · พฤติกรรมปิดมือ vs บอท"""
+    st.subheader("ไม้ทุกบอทในที่เดียว")
+    now_utc = datetime.now(timezone.utc)
+    # --- ไม้ที่เปิดอยู่ทุกบอท ---
+    rows = []
+    for d in db.status.find({"positions.0": {"$exists": True}}, {"indicators": 0, "upcoming_news": 0, "recent_news": 0, "params_info": 0, "expected": 0}):
+        for p in d.get("positions") or []:
+            rows.append({"บอท": bot_labels.get(d["_id"], d["_id"]), "ด้าน": p.get("side"), "lot": p.get("volume"), "ราคาเข้า": p.get("price_open"),
+                         "ราคาตอนนี้": p.get("price_current"), "SL": p.get("sl"), "TP": p.get("tp") or None, "กำไรลอย $": p.get("profit"),
+                         "เปิดเมื่อ (เซิร์ฟเวอร์)": p.get("open_time"), "ticket": p.get("ticket")})
+    if rows:
+        op = pd.DataFrame(rows)
+        c = st.columns(3)
+        c[0].metric("ไม้เปิดอยู่ทั้งหมด", len(op))
+        c[1].metric("กำไรลอยรวม", f"{op['กำไรลอย $'].sum():+,.2f} USD")
+        c[2].metric("BUY / SELL", f"{(op['ด้าน'] == 'BUY').sum()} / {(op['ด้าน'] == 'SELL').sum()}")
+        st.dataframe(op, width="stretch", hide_index=True)
+    else:
+        st.info("ตอนนี้ไม่มีไม้เปิดอยู่ในบอทตัวไหนเลย")
+
+    docs = load_all_trades()
+    if not docs:
+        return
+    df = pd.DataFrame(docs)
+    for col in ("source", "tier", "tp_usd", "spread_points", "open_time", "exit_reason", "lot", "entry_price", "exit_price"):
+        if col not in df:
+            df[col] = np.nan
+    df["บอท"] = df["bot_id"].map(lambda i: bot_labels.get(i, i))
+    df["ปิดเมื่อ"] = server_to_th(df["close_time"]).values
+    df["เปิดเมื่อ"] = server_to_th(df["open_time"]).values
+    df["กำไร $"] = pd.to_numeric(df["net_profit"], errors="coerce")
+    df["R"] = pd.to_numeric(df["r_multiple"], errors="coerce")
+    df = df.dropna(subset=["ปิดเมื่อ", "กำไร $"]).sort_values("ปิดเมื่อ")
+    df["ถือ (นาที)"] = ((df["ปิดเมื่อ"] - df["เปิดเมื่อ"]).dt.total_seconds() / 60).round()
+    df["ที่มา"] = df["source"].fillna("signal")
+    df["ปิดโดย"] = np.where(df["exit_reason"].astype(str).str.contains("มือ|สั่งปิด|dashboard", regex=True), "ปิดมือ", "บอท (SL/TP/สัญญาณ)")
+
+    # --- กำไรสะสมรวมทีม เทียบเป้า ---
+    goal = db.team.find_one({"_id": "goal"})
+    cum = df.assign(สะสม=df["กำไร $"].cumsum())
+    st.markdown("**กำไรสะสมรวมทุกบอท (ทุกไม้ที่ปิดแล้ว เรียงตามเวลา)**")
+    base = alt.Chart(cum).mark_line(point=True).encode(x=alt.X("ปิดเมื่อ:T", title="เวลาไทย"), y=alt.Y("สะสม:Q", title="กำไรสะสม (USD)"),
+                                                       tooltip=["บอท", "ปิดเมื่อ:T", alt.Tooltip("กำไร $:Q", format="+,.2f"), alt.Tooltip("สะสม:Q", format="+,.2f")])
+    layers = [base]
+    if goal and goal.get("target"):
+        layers.append(alt.Chart(pd.DataFrame({"y": [float(goal["target"])]})).mark_rule(strokeDash=[6, 4], color="#d4a017").encode(y="y:Q"))
+    st.altair_chart(alt.layer(*layers), width="stretch")
+    st.caption("เส้นประ = เป้ากำไรรวมของทีม (นับตั้งแต่เริ่มเป้า ส่วนกราฟนี้นับทุกไม้ในระบบ จึงเริ่มก่อนเป้า)")
+
+    # --- สมุดบันทึกไม้ ---
+    st.markdown("**สมุดบันทึกไม้**")
+    f1, f2, f3 = st.columns(3)
+    bots_sel = f1.multiselect("บอท", sorted(df["บอท"].unique()), default=[], key="jr_bots", placeholder="ทุกบอท")
+    src_sel = f2.multiselect("ที่มาของไม้", sorted(df["ที่มา"].unique()), default=[], key="jr_src", placeholder="ทุกที่มา")
+    side_sel = f3.multiselect("ด้าน", ["BUY", "SELL"], default=[], key="jr_side", placeholder="ทั้งสองด้าน")
+    v = df
+    if bots_sel: v = v[v["บอท"].isin(bots_sel)]
+    if src_sel: v = v[v["ที่มา"].isin(src_sel)]
+    if side_sel: v = v[v["side"].isin(side_sel)]
+    if v.empty:
+        st.info("ไม่มีไม้ตรงตัวกรอง")
+        return
+    gw, gl = v.loc[v["กำไร $"] > 0, "กำไร $"].sum(), -v.loc[v["กำไร $"] < 0, "กำไร $"].sum()
+    m = st.columns(5)
+    m[0].metric("จำนวนไม้", len(v)); m[1].metric("กำไรสุทธิ", f"{v['กำไร $'].sum():+,.2f}"); m[2].metric("ชนะ", f"{(v['กำไร $'] > 0).mean():.0%}")
+    m[3].metric("เฉลี่ย/ไม้", f"{v['กำไร $'].mean():+.2f}"); m[4].metric("Profit factor", f"{gw / gl:.2f}" if gl else "–")
+    cols = ["ปิดเมื่อ", "บอท", "side", "lot", "entry_price", "exit_price", "กำไร $", "R", "ถือ (นาที)", "ปิดโดย", "exit_reason", "ที่มา", "tier", "tp_usd", "spread_points", "slippage_pts"]
+    st.dataframe(v.sort_values("ปิดเมื่อ", ascending=False)[[c for c in cols if c in v]].rename(columns={"side": "ด้าน", "entry_price": "ราคาเข้า", "exit_price": "ราคาออก",
+                 "exit_reason": "เหตุผลปิด", "spread_points": "spread", "slippage_pts": "slip"}), width="stretch", hide_index=True)
+
+    # --- พฤติกรรมปิดมือ vs บอท ---
+    st.markdown("**ปิดมือ vs บอทปิดเอง (ตามตัวกรองด้านบน)**")
+    comp = v.groupby("ปิดโดย").agg(ไม้=("กำไร $", "size"), กำไรสุทธิ=("กำไร $", "sum"), เฉลี่ยต่อไม้=("กำไร $", "mean"), ชนะ=("กำไร $", lambda x: (x > 0).mean() * 100),
+                                   ถือเฉลี่ย_นาที=("ถือ (นาที)", "mean")).round(2)
+    st.dataframe(comp, width="stretch")
+    st.caption("ตัวอย่างยังน้อย อย่าสรุปแรง · ไม้ที่ปิดมือถูกตัดกำไร/ขาดทุนก่อนถึง TP/SL ของบอท — เทียบว่าถ้าปล่อยไว้จะได้เท่าไรต้องดูราคาหลังปิด (ยังไม่มีในหน้านี้)")
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_all_trades() -> list[dict]:
     return list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1}))
@@ -691,7 +770,7 @@ def live() -> None:
     now = datetime.now(timezone.utc)
     header(s, now)
     trades = load_trades()
-    t1, t2, t3, t4, t5, t7, t6 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "เทียบบอท", "Log"])
+    t1, t2, t3, t4, t5, t7, t8, t6 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "เทียบบอท", "ไม้ทุกบอท", "Log"])
     with t1:
         overview_tab(s, now)
     with t2:
@@ -704,6 +783,8 @@ def live() -> None:
         performance_tab(s, trades)
     with t7:
         compare_tab()
+    with t8:
+        journal_tab()
     with t6:
         log_tab()
 
