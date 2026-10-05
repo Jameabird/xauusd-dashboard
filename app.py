@@ -628,6 +628,11 @@ def trade_frame() -> pd.DataFrame:
     df["ที่มา"] = df["source"].fillna("signal")
     df["ปิดโดย"] = np.where(df["exit_reason"].astype(str).str.contains("มือ|สั่งปิด|dashboard", regex=True), "ปิดมือ", "บอท (SL/TP/สัญญาณ)")
     df["win"] = df["กำไร $"] > 0
+    prof_by_bot = {d["_id"]: str(d.get("profile") or "main") for d in _st}
+    df["โปรไฟล์"] = df["bot_id"].map(lambda i: prof_by_bot.get(i, "main")).str.replace("^ex-", "", regex=True)
+    pt = np.where(df["โบรกเกอร์"] == "Exness", 0.001, 0.01)
+    df["spread $"] = (df["spread_pts"] * pt).round(2)
+    df["slip $"] = (df["slippage_pts"] * pt).round(2)
     return df
 
 
@@ -747,10 +752,10 @@ def journal_section(df: pd.DataFrame) -> None:
     if df.empty:
         return
     goal = db.team.find_one({"_id": "goal"})
-    cum = df.assign(สะสม=df["กำไร $"].cumsum())
-    st.markdown("**กำไรสะสมรวมทุกบอท (ทุกไม้ที่ปิดแล้ว เรียงตามเวลา)**")
+    cum = df.assign(สะสม=df.groupby("โบรกเกอร์")["กำไร $"].cumsum())
+    st.markdown("**กำไรสะสมรวมทุกบอท แยกตามโบรกเกอร์ (บัญชีคนละขนาด จึงไม่รวมกัน)**")
     layers = [alt.Chart(cum).mark_line(point=True).encode(x=alt.X("ปิดเมื่อ:T", title="เวลาไทย"), y=alt.Y("สะสม:Q", title="กำไรสะสม (USD)"),
-              tooltip=["บอท", "ปิดเมื่อ:T", alt.Tooltip("กำไร $:Q", format="+,.2f"), alt.Tooltip("สะสม:Q", format="+,.2f")])]
+              color=alt.Color("โบรกเกอร์:N"), tooltip=["โบรกเกอร์", "บอท", "ปิดเมื่อ:T", alt.Tooltip("กำไร $:Q", format="+,.2f"), alt.Tooltip("สะสม:Q", format="+,.2f")])]
     if goal and goal.get("target"):
         layers.append(alt.Chart(pd.DataFrame({"y": [float(goal["target"])]})).mark_rule(strokeDash=[6, 4], color="#d4a017").encode(y="y:Q"))
     st.altair_chart(alt.layer(*layers), width="stretch")
@@ -770,9 +775,9 @@ def journal_section(df: pd.DataFrame) -> None:
     m = st.columns(5)
     m[0].metric("จำนวนไม้", len(v)); m[1].metric("กำไรสุทธิ", f"{v['กำไร $'].sum():+,.2f}"); m[2].metric("ชนะ", f"{(v['กำไร $'] > 0).mean():.0%}")
     m[3].metric("เฉลี่ย/ไม้", f"{v['กำไร $'].mean():+.2f}"); m[4].metric("Profit factor", f"{gw / gl:.2f}" if gl else "–")
-    cols = ["ปิดเมื่อ", "บอท", "side", "lot", "entry_price", "exit_price", "กำไร $", "R", "ถือ (นาที)", "ปิดโดย", "exit_reason", "ที่มา", "tier", "tp_usd", "spread_pts", "slippage_pts"]
+    cols = ["ปิดเมื่อ", "บอท", "side", "lot", "entry_price", "exit_price", "กำไร $", "R", "ถือ (นาที)", "ปิดโดย", "exit_reason", "ที่มา", "tier", "tp_usd", "spread $", "slip $", "โบรกเกอร์"]
     st.dataframe(v.sort_values("ปิดเมื่อ", ascending=False)[[c for c in cols if c in v]].rename(columns={"side": "ด้าน", "entry_price": "ราคาเข้า", "exit_price": "ราคาออก",
-                 "exit_reason": "เหตุผลปิด", "spread_pts": "spread", "slippage_pts": "slip"}), width="stretch", hide_index=True)
+                 "exit_reason": "เหตุผลปิด"}), width="stretch", hide_index=True)
     st.markdown("**ปิดมือ vs บอทปิดเอง (ตามตัวกรองด้านบน)**")
     comp = v.groupby("ปิดโดย").agg(ไม้=("กำไร $", "size"), กำไรสุทธิ=("กำไร $", "sum"), เฉลี่ยต่อไม้=("กำไร $", "mean"), ชนะ=("กำไร $", lambda x: (x > 0).mean() * 100),
                                    ถือเฉลี่ย_นาที=("ถือ (นาที)", "mean")).round(2)
@@ -867,10 +872,28 @@ def early_close_section(df: pd.DataFrame) -> None:
                "ตัวอย่างน้อยมาก ใช้ดูแนวโน้มเท่านั้น ไม่ใช่ข้อสรุป")
 
 
+def broker_compare_section(df: pd.DataFrame) -> None:
+    """กลยุทธ์เดียวกันบนสองโบรกเกอร์: ต้นทุนจริง (spread/slippage เป็นดอลลาร์) และผลต่อไม้ — ใช้ตัดสินว่าโบรกเกอร์ไหนเหมาะกับการเทรดจริง"""
+    ex_ids = [i for i, sv in server_by_bot.items() if sv.lower().startswith("exness")]
+    if df.empty or not ex_ids:
+        st.info("ยังไม่มีข้อมูลจากบัญชี Exness")
+        return
+    d = df.copy()
+    g = d.groupby(["โปรไฟล์", "โบรกเกอร์"]).agg(ไม้=("กำไร $", "size"), กำไรสุทธิ=("กำไร $", "sum"), เฉลี่ยต่อไม้=("กำไร $", "mean"),
+                                               ชนะ=("กำไร $", lambda x: (x > 0).mean() * 100), spread=("spread $", "mean"), slip=("slip $", "mean")).round(2)
+    st.markdown("**ผลและต้นทุนจริงต่อกลยุทธ์ แยกตามโบรกเกอร์** (ขนาดบัญชีต่างกัน $100,000 vs $10,000 ดูเฉลี่ยต่อไม้และต้นทุน อย่าเทียบ $ รวม)")
+    st.dataframe(g.rename(columns={"spread": "spread เฉลี่ยตอนเข้า $", "slip": "slippage เฉลี่ย $"}), width="stretch")
+    c = d.groupby("โบรกเกอร์").agg(ไม้=("กำไร $", "size"), spread=("spread $", "mean"), slip=("slip $", "mean")).round(3)
+    cols = st.columns(max(len(c), 1))
+    for col, (b, r) in zip(cols, c.iterrows()):
+        col.metric(f"{b} · ต้นทุนเข้าเฉลี่ย", f"spread ${r['spread']:.2f}", f"slip ${r['slip']:+.3f} · {int(r['ไม้'])} ไม้", delta_color="off", delta_arrow="off")
+    st.caption("สัญญาณของสองโบรกเกอร์ไม่เหมือนกันเป๊ะ (ราคา/เวลาเซิร์ฟเวอร์/spread ต่าง) ใช้เทียบ 'ต้นทุนและความเป็นไปได้' ไม่ใช่เทียบไม้ต่อไม้ · ต้องมีไม้เยอะพอก่อนสรุป")
+
+
 def team_tab() -> None:
     st.subheader("ทีมบอททั้งหมด")
     df = trade_frame()
-    t1, t2, t3, t4, t5 = st.tabs(["สถานะ & เป้า", "เทียบบอท", "ไม้ & สมุดบันทึก", "กราฟรวม", "ปิดมือเร็วไปไหม"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["สถานะ & เป้า", "เทียบบอท", "ไม้ & สมุดบันทึก", "กราฟรวม", "ปิดมือเร็วไปไหม", "MetaQuotes vs Exness"])
     with t1:
         status_goal_section()
     with t2:
@@ -881,6 +904,8 @@ def team_tab() -> None:
         all_chart_section(df)
     with t5:
         early_close_section(df)
+    with t6:
+        broker_compare_section(df)
 
 
 @st.fragment(run_every="3s")
