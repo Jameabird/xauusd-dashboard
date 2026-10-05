@@ -56,9 +56,11 @@ def th_time(dt: datetime) -> str:
     return dt.astimezone(TH).strftime("%d/%m %H:%M:%S")
 
 
-def server_to_th(values) -> pd.Series:
+def server_to_th(values, utc: bool = False) -> pd.Series:
     """เวลาเซิร์ฟเวอร์ MT5 (ข้อความ) → เวลาไทยแบบไม่มี timezone (ให้กราฟแสดงตามนั้นตรงๆ)"""
     t = pd.to_datetime(pd.Series(values), errors="coerce")
+    if utc:  # Exness: เวลาเซิร์ฟเวอร์ = UTC
+        return t.dt.tz_localize("UTC").dt.tz_convert("Asia/Bangkok").dt.tz_localize(None)
     t = (t - pd.Timedelta(hours=7)).dt.tz_localize(SERVER_TZ, ambiguous=False, nonexistent="shift_forward")
     return t.dt.tz_convert("Asia/Bangkok").dt.tz_localize(None)
 
@@ -96,10 +98,14 @@ if not secret("MONGODB_URI"):
     st.stop()
 db = get_db("MONGODB_URI")
 try:
-    _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1}))
+    _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1, "server": 1}))
+    server_by_bot = {d["_id"]: str(d.get("server") or "") for d in _st}
     bot_ids = [d["_id"] for d in _st]
+    def _pname(prof: str) -> str:
+        acct, base = ("Exness · ", prof[3:]) if prof.startswith("ex-") else ("", prof)
+        return acct + PROFILE_NAMES.get(base, base)
     PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)"}
-    bot_labels = {d["_id"]: f"{PROFILE_NAMES.get(d.get('profile', 'main'), d.get('profile', 'main'))} · "
+    bot_labels = {d["_id"]: f"{_pname(d.get('profile', 'main'))} · "
                             f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
     if e.code in (18, 8000):  # AuthenticationFailed (Atlas ส่ง 8000 "bad auth")
@@ -604,8 +610,14 @@ def trade_frame() -> pd.DataFrame:
     df["บอท"] = df["bot_id"].map(lambda i: bot_labels.get(i, i))
     df["tcl"] = pd.to_datetime(df["close_time"], errors="coerce")  # เวลาเซิร์ฟเวอร์ (ใช้เทียบกับแท่งราคา)
     df["top"] = pd.to_datetime(df["open_time"], errors="coerce")
-    df["ปิดเมื่อ"] = server_to_th(df["close_time"]).values
-    df["เปิดเมื่อ"] = server_to_th(df["open_time"]).values
+    df["โบรกเกอร์"] = df["bot_id"].map(lambda i: "Exness" if server_by_bot.get(i, "").lower().startswith("exness") else "MetaQuotes")
+    ex = (df["โบรกเกอร์"] == "Exness").to_numpy()
+    df["ปิดเมื่อ"] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    df["เปิดเมื่อ"] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    for mask, utc in ((~ex, False), (ex, True)):
+        if mask.any():
+            df.loc[mask, "ปิดเมื่อ"] = server_to_th(df.loc[mask, "close_time"], utc=utc).values
+            df.loc[mask, "เปิดเมื่อ"] = server_to_th(df.loc[mask, "open_time"], utc=utc).values
     df["กำไร $"] = pd.to_numeric(df["net_profit"], errors="coerce")
     df["R"] = pd.to_numeric(df["r_multiple"], errors="coerce")
     for col in ("entry_price", "exit_price", "lot", "sl", "tp_usd", "spread_pts", "slippage_pts"):
@@ -768,7 +780,8 @@ def journal_section(df: pd.DataFrame) -> None:
 
 
 def m5_source_ids() -> tuple:
-    return tuple(d["_id"] for d in db.status.find({"config.timeframe": "M5"}, {"_id": 1}))
+    # แท่งราคา/เวลาเซิร์ฟเวอร์ของ MetaQuotes เท่านั้น (Exness คนละโซนเวลา/ราคา จึงไม่ปนในกราฟรวมและการวิเคราะห์ปิดมือ)
+    return tuple(d["_id"] for d in db.status.find({"config.timeframe": "M5", "server": {"$not": {"$regex": "^Exness", "$options": "i"}}}, {"_id": 1}))
 
 
 def all_chart_section(df: pd.DataFrame) -> None:
@@ -787,7 +800,7 @@ def all_chart_section(df: pd.DataFrame) -> None:
     y = alt.Y("l:Q", title=None, scale=alt.Scale(zero=False), axis=alt.Axis(format=",.0f"))
     layers = [base.mark_rule().encode(y=y, y2="h:Q", color=color), base.mark_bar(size=max(2, int(900 / len(b)))).encode(y="o:Q", y2="c:Q", color=color)]
     if not df.empty:
-        v = df[(df["top"] >= t0) | (df["tcl"] >= t0)].dropna(subset=["entry_price", "exit_price"])
+        v = df[(df["โบรกเกอร์"] == "MetaQuotes") & ((df["top"] >= t0) | (df["tcl"] >= t0))].dropna(subset=["entry_price", "exit_price"])
         if not v.empty:
             legs = pd.concat([
                 pd.DataFrame({"id": v.index, "บอท": v["บอท"], "t": v["เปิดเมื่อ"], "p": v["entry_price"], "kind": "เข้า " + v["side"].astype(str), "กำไร": v["กำไร $"]}),
@@ -809,7 +822,7 @@ def early_close_section(df: pd.DataFrame) -> None:
     if df.empty or bars.empty:
         st.info("ยังไม่มีข้อมูลพอ (ต้องมีไม้ปิดมือ และแท่ง M5 หลังเวลาปิด)")
         return
-    man = df[(df["ปิดโดย"] == "ปิดมือ") & df["tcl"].notna() & df["entry_price"].notna() & df["exit_price"].notna() & df["lot"].notna()]
+    man = df[(df["โบรกเกอร์"] == "MetaQuotes") & (df["ปิดโดย"] == "ปิดมือ") & df["tcl"].notna() & df["entry_price"].notna() & df["exit_price"].notna() & df["lot"].notna()]
     if man.empty:
         st.info("ยังไม่มีไม้ที่ปิดด้วยมือ")
         return
@@ -874,7 +887,9 @@ def team_tab() -> None:
 def ticker() -> None:
     """แถบสรุปบนสุด อัปเดตทุก 3 วินาที (ดึงเฉพาะฟิลด์เบา ๆ) — เห็นกำไรทีม/ไม้เปิด/บอทออนไลน์แบบเกือบเรียลไทม์"""
     now_utc = datetime.now(timezone.utc)
-    docs = list(db.status.find({}, {"balance": 1, "equity": 1, "bid": 1, "ask": 1, "positions": 1, "day_pnl": 1, "updated_at": 1, "running": 1}))
+    docs = list(db.status.find({"server": {"$not": {"$regex": "^Exness", "$options": "i"}}},
+                               {"balance": 1, "equity": 1, "bid": 1, "ask": 1, "positions": 1, "day_pnl": 1, "updated_at": 1, "running": 1}))
+    ex_docs = list(db.status.find({"server": {"$regex": "^Exness", "$options": "i"}}, {"equity": 1, "positions": 1, "updated_at": 1, "running": 1}))
     if not docs:
         return
     online = sum(1 for d in docs if d.get("running") and d.get("updated_at") is not None and
@@ -883,7 +898,11 @@ def ticker() -> None:
     floating = sum(float(p.get("profit") or 0) for p in pos)
     ref = max(docs, key=lambda d: d.get("updated_at") or datetime.min.replace(tzinfo=timezone.utc))
     goal = db.team.find_one({"_id": "goal"}, {"team_pnl": 1, "target": 1, "target_reached": 1, "halt_all": 1})
-    c = st.columns(5)
+    c = st.columns(6 if ex_docs else 5)
+    if ex_docs:
+        exf = sum(float(p.get("profit") or 0) for d in ex_docs for p in (d.get("positions") or []))
+        c[5].metric("Exness Demo", f"{max((float(d.get('equity') or 0) for d in ex_docs), default=0):,.2f}",
+                    f"ไม้เปิด {sum(len(d.get('positions') or []) for d in ex_docs)} · ลอย {exf:+,.2f}", delta_color="off", delta_arrow="off")
     if goal:
         tgt, pnl = float(goal.get("target") or 1000), float(goal.get("team_pnl") or 0)
         c[0].metric("กำไรรวมทีม", f"{pnl:+,.2f}", f"{pnl / tgt:.0%} ของเป้า ${tgt:,.0f}" + (" ✅" if goal.get("target_reached") else " 🛑" if goal.get("halt_all") else ""),
