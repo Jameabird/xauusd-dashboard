@@ -560,6 +560,24 @@ def market_tab(now: datetime) -> None:
 def compare_tab() -> None:
     """เทียบทุกบอท: ตัวไหนทำกำไรได้ดีที่สุด รายวัน/รายสัปดาห์/รายเดือน (เวลาไทย, ไม้ที่ปิดแล้วเท่านั้น)"""
     st.subheader("เทียบบอท — ตัวไหนทำกำไรได้ดีที่สุด")
+    # --- สถานะทุกบอทตอนนี้ ---
+    fleet = []
+    now_utc = datetime.now(timezone.utc)
+    for d in db.status.find({}, {"indicators": 0, "upcoming_news": 0, "recent_news": 0, "params_info": 0, "expected": 0}):
+        up = d.get("updated_at")
+        if up is not None and up.tzinfo is None:
+            up = up.replace(tzinfo=timezone.utc)
+        age = (now_utc - up).total_seconds() if up else None
+        online = bool(d.get("running")) and age is not None and age < 60
+        al = d.get("alerts") or {}
+        fleet.append({"บอท": bot_labels.get(d["_id"], d["_id"]), "สถานะ": "🟢 ออนไลน์" if online else "🔴 ไม่ตอบ",
+                      "อัปเดตล่าสุด": ago(age) if age is not None else "-", "ไม้เปิดอยู่": len(d.get("positions") or []),
+                      "ไม้วันนี้": d.get("entries_today"), "กำไรวันนี้ $": round(float(d.get("day_pnl") or 0), 2),
+                      "หยุดเข้าไม้": "⏸" if d.get("paused") else "", "Telegram": "✅" if al.get("telegram") else "❌",
+                      "Healthchecks": "✅" if al.get("healthcheck") else "❌", "แท่งถัดไป": d.get("next_bar_close")})
+    if fleet:
+        st.markdown("**สถานะบอททุกตัวตอนนี้**")
+        st.dataframe(pd.DataFrame(fleet), width="stretch", hide_index=True)
     goal = db.team.find_one({"_id": "goal"}) if "team" in db.list_collection_names() else None
     if goal:
         tgt, pnl = float(goal.get("target") or 1000), float(goal.get("team_pnl") or 0)
@@ -567,11 +585,15 @@ def compare_tab() -> None:
         st.markdown(f"**เป้ากำไรรวมของทุกบอท: +${tgt:,.0f}** · ตอนนี้ **{pnl:+,.2f}** (ปิดแล้ว {float(goal.get('realized') or 0):+,.2f} · ลอย "
                     f"{float(goal.get('floating') or 0):+,.2f}) · {status} · ลิมิตขาดทุนทีม ${float(goal.get('hard_stop') or 0):,.0f}")
         st.progress(min(max(pnl / tgt, 0.0), 1.0), text=f"{pnl / tgt:.0%} ของเป้า")
+        if goal.get("second_target"):
+            note = goal.get("stage2_note") or ""
+            st.caption(f"ขั้นที่ {goal.get('stage', 1)}/2 · ถ้าถึง +${float(goal.get('first_target') or 1000):,.0f} แล้วเทรนด์ H1/H4/D1 ชัดและเวลาพอ จะไปต่อถึง "
+                       f"+${float(goal['second_target']):,.0f} (ถ้ากำไรลดเหลือครึ่งที่ล็อกไว้ หยุดทันที) " + (f"· {note}" if note else ""))
         pb = goal.get("per_bot") or {}
         if pb:
             st.dataframe(pd.DataFrame([{"บอท": k, "ปิดแล้ว $": v.get("realized"), "ลอย $": v.get("floating"),
                                          "รวม $": round((v.get("realized") or 0) + (v.get("floating") or 0), 2)} for k, v in pb.items()]
-                                       ).sort_values("รวม $", ascending=False), use_container_width=True, hide_index=True)
+                                       ).sort_values("รวม $", ascending=False), width="stretch", hide_index=True)
         st.caption("นับตั้งแต่เริ่มเป้า (tools/team_monitor.py) · ถึงเป้า → ปิดไม้ของทุกบอท + หยุดเปิดไม้ใหม่ · ไม่การันตีว่าจะถึงเป้า")
     docs = list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1}))
     if not docs:
@@ -617,7 +639,7 @@ def compare_tab() -> None:
                           "PF": round(gw / gl, 2) if gl else np.nan, "วันดีสุด $": round(daily.max(), 2), "วันแย่สุด $": round(daily.min(), 2)})
     board = df.groupby("bot").apply(stats, include_groups=False).sort_values("กำไรสุทธิ $", ascending=False)
     st.markdown("**อันดับรวมทุกไม้ที่ปิดแล้ว**")
-    st.dataframe(board, use_container_width=True)
+    st.dataframe(board, width="stretch")
 
     # --- กราฟกำไรตามช่วงเวลา แยกบอท ---
     per = df.groupby(["p", "plabel", "bot"], as_index=False).agg(net=("net", "sum"), trades=("net", "size"), win=("win", "mean"))
@@ -627,28 +649,28 @@ def compare_tab() -> None:
     chart = alt.Chart(per).mark_bar().encode(
         x=alt.X("plabel:N", sort=order, title=None), xOffset="bot:N", y=alt.Y("net:Q", title="กำไรสุทธิ (USD)"),
         color=alt.Color("bot:N", title="บอท"), tooltip=["plabel", "bot", alt.Tooltip("net:Q", format="+,.2f"), "trades", alt.Tooltip("win:Q", format=".0%")])
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
     # --- ตารางกำไรตามช่วงเวลา (แถว = ช่วง, คอลัมน์ = บอท) พร้อมผู้ชนะของแต่ละช่วง ---
     pivot = per.pivot_table(index=["p", "plabel"], columns="bot", values="net", aggfunc="sum").sort_index(ascending=False)
     pivot["🏆 ดีที่สุด"] = pivot.idxmax(axis=1)
     pivot.index = pivot.index.get_level_values("plabel")
     st.markdown(f"**ตารางกำไร ($) {period} — ผู้ชนะแต่ละช่วงอยู่คอลัมน์ท้าย**")
-    st.dataframe(pivot.round(2), use_container_width=True)
+    st.dataframe(pivot.round(2), width="stretch")
 
     # --- เส้นกำไรสะสม ---
     cum = df.sort_values("t").assign(cum=lambda x: x.groupby("bot")["net"].cumsum())
     st.markdown("**กำไรสะสมของแต่ละบอท (เรียงตามเวลาปิดไม้)**")
     st.altair_chart(alt.Chart(cum).mark_line().encode(x=alt.X("t:T", title="เวลาไทย"), y=alt.Y("cum:Q", title="กำไรสะสม (USD)"),
                                                       color=alt.Color("bot:N", title="บอท"),
-                                                      tooltip=["bot", "t:T", alt.Tooltip("cum:Q", format="+,.2f")]), use_container_width=True)
+                                                      tooltip=["bot", "t:T", alt.Tooltip("cum:Q", format="+,.2f")]), width="stretch")
 
     # --- มือ vs สัญญาณ ---
     if "source" in df and df["source"].notna().any():
         src = df.assign(source=df["source"].fillna("signal")).groupby(["bot", "source"]).agg(
             ไม้=("net", "size"), กำไรสุทธิ=("net", "sum"), เฉลี่ย=("net", "mean")).round(2)
         st.markdown("**แยกที่มาของไม้ (signal = บอทเข้าเอง, dashboard = สั่งมือ)**")
-        st.dataframe(src, use_container_width=True)
+        st.dataframe(src, width="stretch")
     st.caption("เวลาไทย นับเฉพาะไม้ที่ปิดแล้ว · กำไรสุทธิหลังหักคอมมิชชัน/swap · ขนาดไม้ของบอทแต่ละตัวต่างกัน (เทียบ R ประกอบ) "
                "จึงอย่าเทียบ $ อย่างเดียว — บอท H4 เสี่ยง 0.5%/ไม้ บอทฝึก 0.05%/ไม้")
 
