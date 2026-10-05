@@ -20,7 +20,7 @@ from pymongo import DESCENDING, MongoClient
 from pymongo.errors import OperationFailure, PyMongoError, ServerSelectionTimeoutError
 
 TH = timezone(timedelta(hours=7))
-SERVER_TZ = "Europe/Athens"  # MetaQuotes-Demo: UTC+2/+3 ตาม DST ยุโรป
+SERVER_TZ = "America/New_York"  # MetaQuotes-Demo: เวลาเซิร์ฟเวอร์ = เวลานิวยอร์ก + 7 ชม. (UTC+2/+3 ตาม DST สหรัฐ ไม่ใช่ยุโรป)
 OFFLINE_AFTER_S = 60  # บอทอัปเดตทุก ~10 วิ ถ้าเงียบเกินนี้ถือว่าหยุด/คอมดับ/เน็ตหลุด
 CALENDAR_STALE_MIN = 180
 MAX_PIN_TRIES = 5
@@ -59,7 +59,7 @@ def th_time(dt: datetime) -> str:
 def server_to_th(values) -> pd.Series:
     """เวลาเซิร์ฟเวอร์ MT5 (ข้อความ) → เวลาไทยแบบไม่มี timezone (ให้กราฟแสดงตามนั้นตรงๆ)"""
     t = pd.to_datetime(pd.Series(values), errors="coerce")
-    t = t.dt.tz_localize(SERVER_TZ, ambiguous="NaT", nonexistent="shift_forward")
+    t = (t - pd.Timedelta(hours=7)).dt.tz_localize(SERVER_TZ, ambiguous=False, nonexistent="shift_forward")
     return t.dt.tz_convert("Asia/Bangkok").dt.tz_localize(None)
 
 
@@ -557,6 +557,11 @@ def market_tab(now: datetime) -> None:
         st.caption("แหล่งที่ดึงไม่ได้รอบล่าสุด: " + ", ".join(c["errors"]))
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_all_trades() -> list[dict]:
+    return list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1}))
+
+
 def compare_tab() -> None:
     """เทียบทุกบอท: ตัวไหนทำกำไรได้ดีที่สุด รายวัน/รายสัปดาห์/รายเดือน (เวลาไทย, ไม้ที่ปิดแล้วเท่านั้น)"""
     st.subheader("เทียบบอท — ตัวไหนทำกำไรได้ดีที่สุด")
@@ -578,12 +583,17 @@ def compare_tab() -> None:
     if fleet:
         st.markdown("**สถานะบอททุกตัวตอนนี้**")
         st.dataframe(pd.DataFrame(fleet), width="stretch", hide_index=True)
-    goal = db.team.find_one({"_id": "goal"}) if "team" in db.list_collection_names() else None
+    goal = db.team.find_one({"_id": "goal"})
     if goal:
         tgt, pnl = float(goal.get("target") or 1000), float(goal.get("team_pnl") or 0)
+        up_g = goal.get("updated_at")
+        if up_g is not None:
+            up_g = up_g if up_g.tzinfo else up_g.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - up_g).total_seconds() > 120:
+                st.warning(f"ตัวคุมทีมไม่อัปเดตมา {ago((datetime.now(timezone.utc) - up_g).total_seconds())} — ตัวเลขทีมด้านล่างอาจไม่ใช่ปัจจุบัน")
         status = ("✅ ถึงเป้าแล้ว — ทีมหยุดเปิดไม้ใหม่" if goal.get("target_reached") else "🛑 ทีมหยุดเพราะถึงลิมิตขาดทุน" if goal.get("halt_all") else "กำลังเดินหน้า")
         st.markdown(f"**เป้ากำไรรวมของทุกบอท: +${tgt:,.0f}** · ตอนนี้ **{pnl:+,.2f}** (ปิดแล้ว {float(goal.get('realized') or 0):+,.2f} · ลอย "
-                    f"{float(goal.get('floating') or 0):+,.2f}) · {status} · ลิมิตขาดทุนทีม ${float(goal.get('hard_stop') or 0):,.0f}")
+                    f"{float(goal.get('floating') or 0):+,.2f}) · {status} · {'เส้นกันคืนกำไรทีม +' if goal.get('stage') == 2 else 'ลิมิตขาดทุนทีม '}${float(goal.get('hard_stop') or 0):,.0f}")
         st.progress(min(max(pnl / tgt, 0.0), 1.0), text=f"{pnl / tgt:.0%} ของเป้า")
         if goal.get("second_target"):
             note = goal.get("stage2_note") or ""
@@ -595,7 +605,7 @@ def compare_tab() -> None:
                                          "รวม $": round((v.get("realized") or 0) + (v.get("floating") or 0), 2)} for k, v in pb.items()]
                                        ).sort_values("รวม $", ascending=False), width="stretch", hide_index=True)
         st.caption("นับตั้งแต่เริ่มเป้า (tools/team_monitor.py) · ถึงเป้า → ปิดไม้ของทุกบอท + หยุดเปิดไม้ใหม่ · ไม่การันตีว่าจะถึงเป้า")
-    docs = list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1}))
+    docs = load_all_trades()
     if not docs:
         st.info("ยังไม่มีไม้ที่ปิดแล้วจากบอทใด")
         return
@@ -626,7 +636,7 @@ def compare_tab() -> None:
     latest = df["p"].max()
     cur = df[df["p"] == latest].groupby("bot")["net"].sum().sort_values(ascending=False)
     c = st.columns(3)
-    c[0].metric(f"ดีที่สุด{period[3:] if period != 'รายวัน' else 'วันนี้'}({fmt(latest)})", cur.index[0], f"{cur.iloc[0]:+,.2f} USD", delta_color="off", delta_arrow="off")
+    c[0].metric(f"ดีที่สุด{period[3:] if period != 'รายวัน' else ('วันนี้' if latest.date() == datetime.now(TH).date() else 'วันล่าสุด')}({fmt(latest)})", cur.index[0], f"{cur.iloc[0]:+,.2f} USD", delta_color="off", delta_arrow="off")
     c[1].metric("ดีที่สุดรวมทั้งหมด", total.index[0], f"{total.iloc[0]:+,.2f} USD", delta_color="off", delta_arrow="off")
     c[2].metric("แย่ที่สุดรวมทั้งหมด", total.index[-1], f"{total.iloc[-1]:+,.2f} USD", delta_color="off", delta_arrow="off")
 
@@ -637,7 +647,7 @@ def compare_tab() -> None:
         return pd.Series({"ไม้": len(g), "ชนะ %": round(g.win.mean() * 100), "กำไรสุทธิ $": round(g.net.sum(), 2),
                           "เฉลี่ย $/ไม้": round(g.net.mean(), 2), "R เฉลี่ย": round(g.r.mean(), 2) if g.r.notna().any() else np.nan,
                           "PF": round(gw / gl, 2) if gl else np.nan, "วันดีสุด $": round(daily.max(), 2), "วันแย่สุด $": round(daily.min(), 2)})
-    board = df.groupby("bot").apply(stats, include_groups=False).sort_values("กำไรสุทธิ $", ascending=False)
+    board = pd.DataFrame({b: stats(g) for b, g in df.groupby("bot")}).T.sort_values("กำไรสุทธิ $", ascending=False)
     st.markdown("**อันดับรวมทุกไม้ที่ปิดแล้ว**")
     st.dataframe(board, width="stretch")
 
