@@ -98,7 +98,7 @@ db = get_db("MONGODB_URI")
 try:
     _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1}))
     bot_ids = [d["_id"] for d in _st]
-    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4"}
+    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout"}
     bot_labels = {d["_id"]: f"{PROFILE_NAMES.get(d.get('profile', 'main'), d.get('profile', 'main'))} · "
                             f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
@@ -557,13 +557,109 @@ def market_tab(now: datetime) -> None:
         st.caption("แหล่งที่ดึงไม่ได้รอบล่าสุด: " + ", ".join(c["errors"]))
 
 
+def compare_tab() -> None:
+    """เทียบทุกบอท: ตัวไหนทำกำไรได้ดีที่สุด รายวัน/รายสัปดาห์/รายเดือน (เวลาไทย, ไม้ที่ปิดแล้วเท่านั้น)"""
+    st.subheader("เทียบบอท — ตัวไหนทำกำไรได้ดีที่สุด")
+    goal = db.team.find_one({"_id": "goal"}) if "team" in db.list_collection_names() else None
+    if goal:
+        tgt, pnl = float(goal.get("target") or 1000), float(goal.get("team_pnl") or 0)
+        status = ("✅ ถึงเป้าแล้ว — ทีมหยุดเปิดไม้ใหม่" if goal.get("target_reached") else "🛑 ทีมหยุดเพราะถึงลิมิตขาดทุน" if goal.get("halt_all") else "กำลังเดินหน้า")
+        st.markdown(f"**เป้ากำไรรวมของทุกบอท: +${tgt:,.0f}** · ตอนนี้ **{pnl:+,.2f}** (ปิดแล้ว {float(goal.get('realized') or 0):+,.2f} · ลอย "
+                    f"{float(goal.get('floating') or 0):+,.2f}) · {status} · ลิมิตขาดทุนทีม ${float(goal.get('hard_stop') or 0):,.0f}")
+        st.progress(min(max(pnl / tgt, 0.0), 1.0), text=f"{pnl / tgt:.0%} ของเป้า")
+        pb = goal.get("per_bot") or {}
+        if pb:
+            st.dataframe(pd.DataFrame([{"บอท": k, "ปิดแล้ว $": v.get("realized"), "ลอย $": v.get("floating"),
+                                         "รวม $": round((v.get("realized") or 0) + (v.get("floating") or 0), 2)} for k, v in pb.items()]
+                                       ).sort_values("รวม $", ascending=False), use_container_width=True, hide_index=True)
+        st.caption("นับตั้งแต่เริ่มเป้า (tools/team_monitor.py) · ถึงเป้า → ปิดไม้ของทุกบอท + หยุดเปิดไม้ใหม่ · ไม่การันตีว่าจะถึงเป้า")
+    docs = list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1}))
+    if not docs:
+        st.info("ยังไม่มีไม้ที่ปิดแล้วจากบอทใด")
+        return
+    df = pd.DataFrame(docs)
+    df["bot"] = df["bot_id"].map(lambda i: bot_labels.get(i, i))
+    df["t"] = server_to_th(df["close_time"]).values
+    df["net"] = pd.to_numeric(df["net_profit"], errors="coerce")
+    df["r"] = pd.to_numeric(df["r_multiple"], errors="coerce")
+    df = df.dropna(subset=["t", "net"])
+    if df.empty:
+        st.info("ยังไม่มีข้อมูลที่ใช้ได้")
+        return
+    df["win"] = df["net"] > 0
+    period = st.radio("ช่วงเวลา", ["รายวัน", "รายสัปดาห์", "รายเดือน"], horizontal=True, key="cmp_period")
+    if period == "รายวัน":
+        df["p"] = df["t"].dt.normalize()
+        fmt = lambda x: f"{x:%d/%m}"
+    elif period == "รายสัปดาห์":
+        df["p"] = df["t"].dt.to_period("W-SUN").dt.start_time
+        fmt = lambda x: f"สัปดาห์ {x:%d/%m}"
+    else:
+        df["p"] = df["t"].dt.to_period("M").dt.start_time
+        fmt = lambda x: f"{x:%m/%Y}"
+    df["plabel"] = df["p"].map(fmt)
+
+    # --- ผู้นำ ---
+    total = df.groupby("bot")["net"].sum().sort_values(ascending=False)
+    latest = df["p"].max()
+    cur = df[df["p"] == latest].groupby("bot")["net"].sum().sort_values(ascending=False)
+    c = st.columns(3)
+    c[0].metric(f"ดีที่สุด{period[3:] if period != 'รายวัน' else 'วันนี้'}({fmt(latest)})", cur.index[0], f"{cur.iloc[0]:+,.2f} USD", delta_color="off", delta_arrow="off")
+    c[1].metric("ดีที่สุดรวมทั้งหมด", total.index[0], f"{total.iloc[0]:+,.2f} USD", delta_color="off", delta_arrow="off")
+    c[2].metric("แย่ที่สุดรวมทั้งหมด", total.index[-1], f"{total.iloc[-1]:+,.2f} USD", delta_color="off", delta_arrow="off")
+
+    # --- ตารางอันดับรวม ---
+    def stats(g: pd.DataFrame) -> pd.Series:
+        gw, gl = g.loc[g.net > 0, "net"].sum(), -g.loc[g.net < 0, "net"].sum()
+        daily = g.groupby(g["t"].dt.normalize())["net"].sum()
+        return pd.Series({"ไม้": len(g), "ชนะ %": round(g.win.mean() * 100), "กำไรสุทธิ $": round(g.net.sum(), 2),
+                          "เฉลี่ย $/ไม้": round(g.net.mean(), 2), "R เฉลี่ย": round(g.r.mean(), 2) if g.r.notna().any() else np.nan,
+                          "PF": round(gw / gl, 2) if gl else np.nan, "วันดีสุด $": round(daily.max(), 2), "วันแย่สุด $": round(daily.min(), 2)})
+    board = df.groupby("bot").apply(stats, include_groups=False).sort_values("กำไรสุทธิ $", ascending=False)
+    st.markdown("**อันดับรวมทุกไม้ที่ปิดแล้ว**")
+    st.dataframe(board, use_container_width=True)
+
+    # --- กราฟกำไรตามช่วงเวลา แยกบอท ---
+    per = df.groupby(["p", "plabel", "bot"], as_index=False).agg(net=("net", "sum"), trades=("net", "size"), win=("win", "mean"))
+    per = per.sort_values("p")
+    order = list(per.drop_duplicates("plabel")["plabel"])
+    st.markdown(f"**กำไรสุทธิ ({period}) แยกตามบอท**")
+    chart = alt.Chart(per).mark_bar().encode(
+        x=alt.X("plabel:N", sort=order, title=None), xOffset="bot:N", y=alt.Y("net:Q", title="กำไรสุทธิ (USD)"),
+        color=alt.Color("bot:N", title="บอท"), tooltip=["plabel", "bot", alt.Tooltip("net:Q", format="+,.2f"), "trades", alt.Tooltip("win:Q", format=".0%")])
+    st.altair_chart(chart, use_container_width=True)
+
+    # --- ตารางกำไรตามช่วงเวลา (แถว = ช่วง, คอลัมน์ = บอท) พร้อมผู้ชนะของแต่ละช่วง ---
+    pivot = per.pivot_table(index=["p", "plabel"], columns="bot", values="net", aggfunc="sum").sort_index(ascending=False)
+    pivot["🏆 ดีที่สุด"] = pivot.idxmax(axis=1)
+    pivot.index = pivot.index.get_level_values("plabel")
+    st.markdown(f"**ตารางกำไร ($) {period} — ผู้ชนะแต่ละช่วงอยู่คอลัมน์ท้าย**")
+    st.dataframe(pivot.round(2), use_container_width=True)
+
+    # --- เส้นกำไรสะสม ---
+    cum = df.sort_values("t").assign(cum=lambda x: x.groupby("bot")["net"].cumsum())
+    st.markdown("**กำไรสะสมของแต่ละบอท (เรียงตามเวลาปิดไม้)**")
+    st.altair_chart(alt.Chart(cum).mark_line().encode(x=alt.X("t:T", title="เวลาไทย"), y=alt.Y("cum:Q", title="กำไรสะสม (USD)"),
+                                                      color=alt.Color("bot:N", title="บอท"),
+                                                      tooltip=["bot", "t:T", alt.Tooltip("cum:Q", format="+,.2f")]), use_container_width=True)
+
+    # --- มือ vs สัญญาณ ---
+    if "source" in df and df["source"].notna().any():
+        src = df.assign(source=df["source"].fillna("signal")).groupby(["bot", "source"]).agg(
+            ไม้=("net", "size"), กำไรสุทธิ=("net", "sum"), เฉลี่ย=("net", "mean")).round(2)
+        st.markdown("**แยกที่มาของไม้ (signal = บอทเข้าเอง, dashboard = สั่งมือ)**")
+        st.dataframe(src, use_container_width=True)
+    st.caption("เวลาไทย นับเฉพาะไม้ที่ปิดแล้ว · กำไรสุทธิหลังหักคอมมิชชัน/swap · ขนาดไม้ของบอทแต่ละตัวต่างกัน (เทียบ R ประกอบ) "
+               "จึงอย่าเทียบ $ อย่างเดียว — บอท H4 เสี่ยง 0.5%/ไม้ บอทฝึก 0.05%/ไม้")
+
+
 @st.fragment(run_every="15s")
 def live() -> None:
     s = db.status.find_one({"_id": bot_id})
     now = datetime.now(timezone.utc)
     header(s, now)
     trades = load_trades()
-    t1, t2, t3, t4, t5, t6 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "Log"])
+    t1, t2, t3, t4, t5, t7, t6 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "เทียบบอท", "Log"])
     with t1:
         overview_tab(s, now)
     with t2:
@@ -574,6 +670,8 @@ def live() -> None:
         market_tab(now)
     with t5:
         performance_tab(s, trades)
+    with t7:
+        compare_tab()
     with t6:
         log_tab()
 
