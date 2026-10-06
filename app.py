@@ -98,6 +98,40 @@ if not secret("MONGODB_URI"):
     st.error("ยังไม่ได้ตั้ง MONGODB_URI — ใส่ใน Secrets ของ Streamlit หรือ environment variable")
     st.stop()
 db = get_db("MONGODB_URI")
+
+# บอทที่ปลดแล้ว (2026-10-06: ไม่เคยเข้าไม้จากสัญญาณ) — ซ่อนจากทุกหน้า ข้อมูลยังอยู่ใน DB (ประวัติไม้ที่ปิดแล้วยังนับในกำไรรวม)
+RETIRED_BOT_IDS = ["10012984221-20261003", "10012984221-20261004", "10012984221-20261006", "414406827-20261006"]  # main, re3, bo, ex-bo
+
+
+class _VisibleStatus:
+    def __init__(self, coll):
+        self._c = coll
+
+    def _q(self, q):
+        return {"$and": [q or {}, {"_id": {"$nin": RETIRED_BOT_IDS}}]}
+
+    def find(self, q=None, *a, **k):
+        return self._c.find(self._q(q), *a, **k)
+
+    def find_one(self, q=None, *a, **k):
+        return self._c.find_one(self._q(q), *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+class _VisibleDB:
+    def __init__(self, database):
+        self._d = database
+        self.status = _VisibleStatus(database.status)
+
+    def __getattr__(self, name):
+        return getattr(self._d, name)
+
+    def __getitem__(self, name):
+        return self.status if name == "status" else self._d[name]
+
+db = _VisibleDB(db)
 try:
     _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1, "server": 1}))
     server_by_bot = {d["_id"]: str(d.get("server") or "") for d in _st}
