@@ -100,9 +100,10 @@ db = get_db("MONGODB_URI")
 try:
     _st = list(db.status.find({}, {"_id": 1, "profile": 1, "config.timeframe": 1, "reentry": 1, "server": 1}))
     server_by_bot = {d["_id"]: str(d.get("server") or "") for d in _st}
-    bot_ids = [d["_id"] for d in _st]
+    real_ids = {d["_id"] for d in _st if "real" in str(d.get("server") or "").lower() and str(d.get("server") or "").lower().startswith("exness")}
+    bot_ids = [d["_id"] for d in _st if d["_id"] not in real_ids]
     def _pname(prof: str) -> str:
-        acct, base = ("Exness · ", prof[3:]) if prof.startswith("ex-") else ("", prof)
+        acct, base = (("Exness จริง · ", prof[7:]) if prof.startswith("exreal-") else ("Exness · ", prof[3:]) if prof.startswith("ex-") else ("", prof))
         return acct + PROFILE_NAMES.get(base, base)
     PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)", "m15b": "m15b · breakout M15 (ทดสอบ)"}
     bot_labels = {d["_id"]: f"{_pname(d.get('profile', 'main'))} · "
@@ -599,8 +600,9 @@ def load_m5_bars(bot_ids_m5: tuple) -> pd.DataFrame:
     return b.dropna(subset=["tsrv"])
 
 
-def trade_frame() -> pd.DataFrame:
-    docs = load_all_trades()
+def trade_frame(real: bool = False) -> pd.DataFrame:
+    """ไม้ที่ปิดแล้วของบอท — real=False ไม่รวมบัญชีจริง (กันโผล่ในหน้าสาธารณะ), real=True เฉพาะบัญชีจริง (เรียกหลังใส่ PIN เท่านั้น)"""
+    docs = [x for x in load_all_trades() if (x.get("bot_id") in real_ids) == real]
     if not docs:
         return pd.DataFrame()
     df = pd.DataFrame(docs)
@@ -921,13 +923,191 @@ def team_tab() -> None:
         broker_compare_section(df)
 
 
+def acct_kind(server: str) -> str:
+    s = (server or "").lower()
+    if s.startswith("exness"):
+        return "Exness จริง" if "real" in s else "Exness Demo"
+    return "MetaQuotes Demo"
+
+
+KINDS = ["MetaQuotes Demo", "Exness Demo", "Exness จริง"]
+KIND_NOTE = {"MetaQuotes Demo": "บัญชีเดโม MetaQuotes (เวลาเซิร์ฟเวอร์ = นิวยอร์ก+7) · เป้าทีม +$1,000/+$2,000 นับจากบัญชีนี้",
+             "Exness Demo": "บัญชีเดโม Exness (เวลาเซิร์ฟเวอร์ = UTC) · บอทคู่เดโมของบัญชีจริง (ลองเดโมก่อนเสมอ)",
+             "Exness จริง": "บัญชีจริง Exness — เงินจริง · ดูได้เมื่อใส่ PIN ที่แถบด้านข้าง"}
+
+
+def real_unlocked() -> bool:
+    return bool(st.session_state.get("real_ok"))
+
+
+def sidebar_real_unlock() -> None:
+    """PIN สำหรับดูข้อมูลบัญชีจริง (อยู่นอก auto-refresh ไม่ให้ PIN ที่พิมพ์หาย) — ไม่มี CONTROL_PIN = ล็อกถาวร"""
+    sb = st.sidebar
+    sb.divider()
+    sb.subheader("ดูบัญชีจริง")
+    pin_cfg = secret("CONTROL_PIN")
+    if not pin_cfg:
+        sb.caption("ล็อกอยู่ — ตั้ง CONTROL_PIN ใน Secrets ก่อน")
+        return
+    if real_unlocked():
+        sb.success("ปลดล็อกแล้ว")
+        if sb.button("ล็อกกลับ", key="real_lock"):
+            st.session_state["real_ok"] = False
+            st.rerun()
+        return
+    if st.session_state.get("real_fail", 0) >= MAX_PIN_TRIES:
+        sb.error("ใส่ PIN ผิดเกินกำหนด — โหลดหน้าใหม่เพื่อลองอีกครั้ง")
+        return
+    pin = sb.text_input("PIN", type="password", key="real_pin")
+    if pin:
+        if hmac.compare_digest(pin.encode(), pin_cfg.encode()):
+            st.session_state["real_ok"] = True
+            st.rerun()
+        else:
+            st.session_state["real_fail"] = st.session_state.get("real_fail", 0) + 1
+            sb.error("PIN ไม่ถูกต้อง")
+
+
+def _bot_state(d: dict, now: datetime) -> str:
+    ua = d.get("updated_at")
+    if ua is not None:
+        ua = ua if ua.tzinfo else ua.replace(tzinfo=timezone.utc)
+    if not d.get("running") or ua is None or (now - ua).total_seconds() > OFFLINE_AFTER_S:
+        return "🔴 ออฟไลน์"
+    if d.get("paused"):
+        return "⏸ หยุดเข้าไม้"
+    if d.get("halted_today"):
+        return "🛑 ถึงลิมิตวันนี้"
+    return "🟢 ทำงาน"
+
+
+def account_view(kind: str, now: datetime) -> None:
+    st.caption(KIND_NOTE[kind])
+    is_real = kind == "Exness จริง"
+    if is_real and not real_unlocked():
+        st.info("🔒 บัญชีจริงถูกซ่อนไว้ — ใส่ PIN ที่แถบด้านข้าง (ดูบัญชีจริง)")
+        return
+    proj = {"profile": 1, "running": 1, "updated_at": 1, "balance": 1, "equity": 1, "positions": 1, "day_pnl": 1, "entries_today": 1,
+            "halted_today": 1, "paused": 1, "config.timeframe": 1, "login": 1, "server": 1}
+    docs = [d for d in db.status.find({}, proj) if acct_kind(d.get("server")) == kind]
+    if not docs:
+        st.info("ยังไม่มีบอทในบัญชีประเภทนี้" + (" (ยังไม่ได้เปิดบอทบัญชีจริง)" if is_real else ""))
+        return
+    docs.sort(key=lambda d: str(d.get("profile") or ""))
+    utc = kind != "MetaQuotes Demo"
+    df = trade_frame(real=is_real)
+    ids = {d["_id"] for d in docs}
+    df = df[df["bot_id"].isin(ids)].copy() if len(df) else df
+    ref = max(docs, key=lambda d: d.get("updated_at") or datetime.min.replace(tzinfo=timezone.utc))
+    pos_all = [p for d in docs for p in (d.get("positions") or [])]
+    floating = sum(float(p.get("profit") or 0) for p in pos_all)
+    online = sum(1 for d in docs if _bot_state(d, now) in ("🟢 ทำงาน", "⏸ หยุดเข้าไม้", "🛑 ถึงลิมิตวันนี้"))
+    closed_total = float(df["กำไร $"].sum()) if len(df) else 0.0
+    m = st.columns(6)
+    m[0].metric("Balance", f"{float(ref.get('balance') or 0):,.2f}")
+    m[1].metric("Equity", f"{float(ref.get('equity') or 0):,.2f}", f"ลอย {floating:+,.2f}", delta_color="off", delta_arrow="off")
+    m[2].metric("บอทออนไลน์", f"{online}/{len(docs)}")
+    m[3].metric("ไม้เปิดอยู่", f"{len(pos_all)}")
+    m[4].metric("วันนี้ (ปิดแล้ว)", f"{sum(float(d.get('day_pnl') or 0) for d in docs):+,.2f}")
+    m[5].metric("สะสมทุกไม้ที่ปิด", f"{closed_total:+,.2f}", f"{len(df)} ไม้", delta_color="off", delta_arrow="off")
+
+    st.markdown("**บอททั้งหมดในบัญชีนี้ (ตัวต่อตัว)**")
+    rows = []
+    for d in docs:
+        b = df[df["bot_id"] == d["_id"]] if len(df) else df
+        pos = d.get("positions") or []
+        rows.append({
+            "บอท": _pname(str(d.get("profile") or "main")), "สถานะ": _bot_state(d, now), "TF": (d.get("config") or {}).get("timeframe", ""),
+            "ไม้เปิด": ", ".join(f"{p.get('side')} {p.get('volume')} @{p.get('price_open')}" for p in pos) or "-",
+            "ลอย $": round(sum(float(p.get("profit") or 0) for p in pos), 2), "วันนี้ $": round(float(d.get("day_pnl") or 0), 2),
+            "ไม้วันนี้": d.get("entries_today", 0), "ปิดแล้ว $": round(float(b["กำไร $"].sum()), 2) if len(b) else 0.0,
+            "ไม้ปิด": len(b), "ชนะ": f"{b['win'].mean():.0%}" if len(b) else "-", "_id": d["_id"],
+        })
+    tbl = pd.DataFrame(rows)
+    st.dataframe(tbl.drop(columns=["_id"]), width="stretch", hide_index=True,
+                 column_config={"ลอย $": st.column_config.NumberColumn(format="%+.2f"), "วันนี้ $": st.column_config.NumberColumn(format="%+.2f"),
+                                "ปิดแล้ว $": st.column_config.NumberColumn(format="%+.2f")})
+
+    st.markdown("**ดูทีละตัว**")
+    pick = st.selectbox("เลือกบอท", tbl["_id"].tolist(), format_func=lambda i: next(r["บอท"] + " · " + r["สถานะ"] for r in rows if r["_id"] == i),
+                        key=f"acct_pick_{kind}")
+    d = next(x for x in docs if x["_id"] == pick)
+    b = df[df["bot_id"] == pick].sort_values("ปิดเมื่อ", ascending=False) if len(df) else df
+    k = st.columns(5)
+    k[0].metric("สถานะ", _bot_state(d, now))
+    k[1].metric("ไม้เปิด / ลอย", f"{len(d.get('positions') or [])} ไม้", f"{sum(float(p.get('profit') or 0) for p in (d.get('positions') or [])):+,.2f}",
+                delta_color="off", delta_arrow="off")
+    k[2].metric("วันนี้", f"{float(d.get('day_pnl') or 0):+,.2f}", f"{d.get('entries_today', 0)} ไม้", delta_color="off", delta_arrow="off")
+    k[3].metric("ปิดแล้วสะสม", f"{float(b['กำไร $'].sum()) if len(b) else 0:+,.2f}", f"{len(b)} ไม้", delta_color="off", delta_arrow="off")
+    k[4].metric("ชนะ / R เฉลี่ย", f"{b['win'].mean():.0%}" if len(b) else "-", f"{b['R'].mean():+.2f}R" if len(b) and b["R"].notna().any() else "", delta_color="off", delta_arrow="off")
+
+    pos = d.get("positions") or []
+    st.markdown("**ไม้ที่เปิดอยู่ตอนนี้**")
+    if pos:
+        pdf = pd.DataFrame(pos)
+        for col in ("ticket", "side", "volume", "price_open", "price_current", "sl", "tp", "profit", "open_time", "entry_reason"):
+            if col not in pdf:
+                pdf[col] = np.nan
+        pdf["เปิดเมื่อ (ไทย)"] = server_to_th(pdf["open_time"], utc=utc).dt.strftime("%d/%m %H:%M")
+        st.dataframe(pdf.rename(columns={"ticket": "ticket", "side": "ทิศ", "volume": "lot", "price_open": "เข้า", "price_current": "ราคาตอนนี้",
+                                         "profit": "ลอย $", "entry_reason": "เหตุผลเข้า"})[["ticket", "ทิศ", "lot", "เข้า", "ราคาตอนนี้", "sl", "tp", "ลอย $", "เปิดเมื่อ (ไทย)", "เหตุผลเข้า"]],
+                     width="stretch", hide_index=True)
+    else:
+        st.caption("ไม่มีไม้เปิดอยู่")
+
+    st.markdown("**ประวัติไม้ (ใหม่สุดก่อน)**")
+    if len(b) == 0:
+        st.caption("บอทนี้ยังไม่มีไม้ที่ปิด")
+        return
+    show = b[["ปิดเมื่อ", "เปิดเมื่อ", "side", "lot", "entry_price", "exit_price", "sl", "กำไร $", "R", "ถือ (นาที)", "ปิดโดย", "exit_reason", "tier", "spread $"]].rename(
+        columns={"side": "ทิศ", "entry_price": "เข้า", "exit_price": "ออก", "exit_reason": "เหตุผลปิด"})
+    st.dataframe(show, width="stretch", hide_index=True, height=min(420, 38 + 35 * len(show)),
+                 column_config={"ปิดเมื่อ": st.column_config.DatetimeColumn(format="DD/MM HH:mm"), "เปิดเมื่อ": st.column_config.DatetimeColumn(format="DD/MM HH:mm"),
+                                "กำไร $": st.column_config.NumberColumn(format="%+.2f"), "R": st.column_config.NumberColumn(format="%+.2f")})
+    cum = b.sort_values("ปิดเมื่อ")[["ปิดเมื่อ", "กำไร $"]].copy()
+    cum["สะสม $"] = cum["กำไร $"].cumsum()
+    st.altair_chart(alt.Chart(cum).mark_line(point=True, color=GOLD).encode(
+        x=alt.X("ปิดเมื่อ:T", title="เวลา (ไทย)"), y=alt.Y("สะสม $:Q", title="กำไรสะสม $"),
+        tooltip=[alt.Tooltip("ปิดเมื่อ:T", format="%d/%m %H:%M"), alt.Tooltip("กำไร $:Q", format="+.2f"), alt.Tooltip("สะสม $:Q", format="+.2f")]).properties(height=220),
+        width="stretch")
+
+    st.markdown("**ดูทีละไม้**")
+    opts = b.reset_index(drop=True)
+    one = st.selectbox("เลือกไม้", list(range(len(opts))), key=f"acct_trade_{kind}_{pick}",
+                       format_func=lambda i: f"{opts.loc[i, 'ปิดเมื่อ']:%d/%m %H:%M} · {opts.loc[i, 'side']} {opts.loc[i, 'lot']} · {opts.loc[i, 'กำไร $']:+.2f} $ · {opts.loc[i, 'ปิดโดย']}")
+    t = opts.loc[one]
+    c1, c2 = st.columns(2)
+    c1.markdown(f"**{t['side']} {t['lot']} lot** · เข้า {t['entry_price']} → ออก {t['exit_price']} · SL {t['sl']}  \n"
+                f"เปิด {t['เปิดเมื่อ']:%d/%m %H:%M} · ปิด {t['ปิดเมื่อ']:%d/%m %H:%M} · ถือ {t['ถือ (นาที)']:.0f} นาที  \n"
+                f"กำไร **{t['กำไร $']:+.2f} $** ({t['R'] if t['R'] == t['R'] else 0:+.2f}R) · ปิดโดย {t['ปิดโดย']} ({t['exit_reason']})")
+    c1.caption("เหตุผลเข้า: " + str(t.get("entry_reason") or "-"))
+    import json as _j
+    try:
+        feats = _j.loads(t["features"]) if isinstance(t.get("features"), str) and t["features"] else {}
+    except Exception:
+        feats = {}
+    if feats:
+        c2.dataframe(pd.DataFrame({"ตัวแปรตอนเข้าไม้": list(feats.keys()), "ค่า": list(feats.values())}), width="stretch", hide_index=True, height=260)
+    else:
+        c2.caption("ไม้นี้ไม่มีตัวแปร indicator (ไม้ก่อนเริ่มบันทึก)")
+
+
+def accounts_tab() -> None:
+    st.subheader("แยกตามบัญชี")
+    now = datetime.now(timezone.utc)
+    tabs = st.tabs(KINDS)
+    for tab, kind in zip(tabs, KINDS):
+        with tab:
+            account_view(kind, now)
+
+
 @st.fragment(run_every="3s")
 def ticker() -> None:
     """แถบสรุปบนสุด อัปเดตทุก 3 วินาที (ดึงเฉพาะฟิลด์เบา ๆ) — เห็นกำไรทีม/ไม้เปิด/บอทออนไลน์แบบเกือบเรียลไทม์"""
     now_utc = datetime.now(timezone.utc)
     docs = list(db.status.find({"server": {"$not": {"$regex": "^Exness", "$options": "i"}}},
                                {"balance": 1, "equity": 1, "bid": 1, "ask": 1, "positions": 1, "day_pnl": 1, "updated_at": 1, "running": 1}))
-    ex_docs = list(db.status.find({"server": {"$regex": "^Exness", "$options": "i"}}, {"equity": 1, "positions": 1, "updated_at": 1, "running": 1}))
+    ex_docs = list(db.status.find({"server": {"$regex": "^Exness(?!.*real)", "$options": "i"}}, {"equity": 1, "positions": 1, "updated_at": 1, "running": 1}))
     if not docs:
         return
     online = sum(1 for d in docs if d.get("running") and d.get("updated_at") is not None and
@@ -957,7 +1137,9 @@ def live() -> None:
     now = datetime.now(timezone.utc)
     header(s, now)
     trades = load_trades()
-    t1, t2, t3, t4, t5, t7, t6 = st.tabs(["ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "ทีมบอท", "Log"])
+    t8, t1, t2, t3, t4, t5, t7, t6 = st.tabs(["แยกตามบัญชี", "ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "ทีมบอท", "Log"])
+    with t8:
+        accounts_tab()
     with t1:
         overview_tab(s, now)
     with t2:
@@ -974,5 +1156,6 @@ def live() -> None:
         log_tab()
 
 
+sidebar_real_unlock()
 ticker()
 live()
