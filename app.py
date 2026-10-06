@@ -24,6 +24,7 @@ SERVER_TZ = "America/New_York"  # MetaQuotes-Demo: เวลาเซิร์�
 OFFLINE_AFTER_S = 60  # บอทอัปเดตทุก ~10 วิ ถ้าเงียบเกินนี้ถือว่าหยุด/คอมดับ/เน็ตหลุด
 CALENDAR_STALE_MIN = 180
 MAX_PIN_TRIES = 5
+REAL_STOP_BALANCE, REAL_TARGET_BALANCE = 70.0, 200.0  # บัญชีจริง: ตรงกับ BOT_REAL_STOP_BALANCE / BOT_REAL_TARGET_BALANCE ใน scripts/run_bot_exreal_*.bat
 UP, DOWN, GOLD, MA_FAST, MA_SLOW, MUTED = "#3cc08e", "#f0675c", "#d4a017", "#6b9cff", "#a3aab6", "#8a919c"
 ACTIONS = {
     "follow_trend": ("📈 เข้าตามเทรนด์ตอนนี้", "เข้าตามทิศ MA ปัจจุบันทันที ไม่ต้องรอ MA ตัดใหม่ — ยังผ่าน ADX / ข่าว / ลิมิต "
@@ -1011,22 +1012,46 @@ def account_view(kind: str, now: datetime) -> None:
     m[4].metric("วันนี้ (ปิดแล้ว)", f"{sum(float(d.get('day_pnl') or 0) for d in docs):+,.2f}")
     m[5].metric("สะสมทุกไม้ที่ปิด", f"{closed_total:+,.2f}", f"{len(df)} ไม้", delta_color="off", delta_arrow="off")
 
+    if is_real:  # ความคืบหน้าสู่เป้า/เส้นหยุดของบัญชีจริง (ค่าเดียวกับ BOT_REAL_STOP_BALANCE / BOT_REAL_TARGET_BALANCE ในสคริปต์บอท)
+        bal, eq = float(ref.get("balance") or 0), float(ref.get("equity") or 0)
+        stop_v, target_v = REAL_STOP_BALANCE, REAL_TARGET_BALANCE
+        frac = min(max((bal - stop_v) / (target_v - stop_v), 0.0), 1.0)
+        st.progress(frac, text=f"balance {bal:,.2f} · เส้นหยุด ${stop_v:g} (ปิดทุกไม้) ←→ เป้า ${target_v:g} (ปิดทุกไม้) · equity {eq:,.2f} · ห่างเส้นหยุด ${eq - stop_v:,.2f} · ห่างเป้า ${target_v - bal:,.2f}")
+
+    # กราฟ equity ของบัญชี (ใช้ข้อมูลของบอทที่อัปเดตล่าสุด — equity เป็นระดับบัญชี) 14 วันล่าสุด
+    try:
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=14)
+        eqd = list(db.equity.find({"bot_id": ref["_id"], "time": {"$gte": since}}, {"_id": 0, "time": 1, "equity": 1, "balance": 1}).sort("time", 1))
+        if len(eqd) > 2:
+            ed = pd.DataFrame(eqd)
+            ed["เวลา (ไทย)"] = pd.to_datetime(ed["time"]) + pd.Timedelta(hours=7)
+            base = alt.Chart(ed).encode(x=alt.X("เวลา (ไทย):T", title=""))
+            st.altair_chart((base.mark_line(color=GOLD).encode(y=alt.Y("equity:Q", title="Equity $", scale=alt.Scale(zero=False)),
+                                                                tooltip=[alt.Tooltip("เวลา (ไทย):T", format="%d/%m %H:%M"), alt.Tooltip("equity:Q", format=",.2f"), alt.Tooltip("balance:Q", format=",.2f")])
+                             + base.mark_line(color=MUTED, strokeDash=[4, 3]).encode(y="balance:Q")).properties(height=170), width="stretch")
+            st.caption("เส้นทอง = equity · เส้นประ = balance (14 วันล่าสุด)")
+    except Exception:
+        pass
+    now_th = pd.Timestamp.now(tz="Asia/Bangkok").tz_localize(None)
+
     st.markdown("**บอททั้งหมดในบัญชีนี้ (ตัวต่อตัว)**")
     rows = []
     for d in docs:
         b = df[df["bot_id"] == d["_id"]] if len(df) else df
         pos = d.get("positions") or []
+        p7 = float(b[b["ปิดเมื่อ"] >= now_th - pd.Timedelta(days=7)]["กำไร $"].sum()) if len(b) else 0.0
+        p30 = float(b[b["ปิดเมื่อ"] >= now_th - pd.Timedelta(days=30)]["กำไร $"].sum()) if len(b) else 0.0
         rows.append({
+            "7 วัน $": round(p7, 2), "30 วัน $": round(p30, 2),
             "บอท": _pname(str(d.get("profile") or "main")), "สถานะ": _bot_state(d, now), "TF": (d.get("config") or {}).get("timeframe", ""),
             "ไม้เปิด": ", ".join(f"{p.get('side')} {p.get('volume')} @{p.get('price_open')}" for p in pos) or "-",
             "ลอย $": round(sum(float(p.get("profit") or 0) for p in pos), 2), "วันนี้ $": round(float(d.get("day_pnl") or 0), 2),
             "ไม้วันนี้": d.get("entries_today", 0), "ปิดแล้ว $": round(float(b["กำไร $"].sum()), 2) if len(b) else 0.0,
             "ไม้ปิด": len(b), "ชนะ": f"{b['win'].mean():.0%}" if len(b) else "-", "_id": d["_id"],
         })
-    tbl = pd.DataFrame(rows)
+    tbl = pd.DataFrame(rows)[["บอท", "สถานะ", "TF", "ไม้เปิด", "ลอย $", "วันนี้ $", "7 วัน $", "30 วัน $", "ไม้วันนี้", "ปิดแล้ว $", "ไม้ปิด", "ชนะ", "_id"]]
     st.dataframe(tbl.drop(columns=["_id"]), width="stretch", hide_index=True,
-                 column_config={"ลอย $": st.column_config.NumberColumn(format="%+.2f"), "วันนี้ $": st.column_config.NumberColumn(format="%+.2f"),
-                                "ปิดแล้ว $": st.column_config.NumberColumn(format="%+.2f")})
+                 column_config={c: st.column_config.NumberColumn(format="%+.2f") for c in ("ลอย $", "วันนี้ $", "7 วัน $", "30 วัน $", "ปิดแล้ว $")})
 
     st.markdown("**ดูทีละตัว**")
     pick = st.selectbox("เลือกบอท", tbl["_id"].tolist(), format_func=lambda i: next(r["บอท"] + " · " + r["สถานะ"] for r in rows if r["_id"] == i),
