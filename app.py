@@ -9,7 +9,9 @@ Dashboard บอท XAUUSD — อ่านข้อมูลที่ bot.py �
                   CONTROL_PIN = "..."
 """
 import hmac
+import json
 import os
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import altair as alt
@@ -567,7 +569,24 @@ def log_tab() -> None:
         st.caption("ยังไม่มี log")
 
 
+def move_stats_box() -> None:
+    """ค่าเฉลี่ยขึ้นลงต่อแท่ง (ดอลลาร์/จุด) ทุก timeframe + ภาวะ volatility/volume ตอนนี้เทียบปกติ (จาก research/move_stats.py — ไฟล์ static)"""
+    f = Path(__file__).with_name("move_stats.json")
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    rows = []
+    for tf, v in d.get("tf", {}).items():
+        rows.append({"TF": tf, "ช่วงแท่งเฉลี่ย $": round(v["avg_range"], 2), "จุด (1$=100)": round(v["avg_range_pts"]), "เนื้อแท่ง $": round(v["avg_body"], 2),
+                     "ATR14 $": round(v["atr14"], 2), "ตอนนี้เทียบปกติ (24 ชม.)": f"{v['last24h']['ratio_range']:.2f}x · vol {v['last24h']['ratio_vol']:.2f}x"})
+    with st.expander("ค่าเฉลี่ยขึ้นลงต่อแท่งทุก timeframe + ภาวะตลาดตอนนี้", expanded=True):
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption(f"{d.get('point_note', '')} · ฐานเทียบ {d.get('baseline_days', '')} วันล่าสุด · volume ใช้เป็นตัวกรองความผันผวน ไม่ได้ทำนายทิศ")
+
+
 def market_tab(now: datetime) -> None:
+    move_stats_box()
     c = db.context.find_one({"_id": bot_id})
     if not c:
         st.caption("ยังไม่มีข้อมูลสภาพตลาด — บอทเวอร์ชันใหม่จะดึงทุก 20 นาทีหลังเริ่มรัน")
