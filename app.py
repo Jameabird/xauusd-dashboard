@@ -26,7 +26,8 @@ SERVER_TZ = "America/New_York"  # MetaQuotes-Demo: เวลาเซิร์�
 OFFLINE_AFTER_S = 60  # บอทอัปเดตทุก ~10 วิ ถ้าเงียบเกินนี้ถือว่าหยุด/คอมดับ/เน็ตหลุด
 CALENDAR_STALE_MIN = 180
 MAX_PIN_TRIES = 5
-REAL_STOP_BALANCE, REAL_TARGET_BALANCE = 70.0, 200.0  # บัญชีจริง: ตรงกับ BOT_REAL_STOP_BALANCE / BOT_REAL_TARGET_BALANCE ใน scripts/run_bot_exreal_*.bat
+REAL_STOP_BALANCE, REAL_TARGET_BALANCE, REAL_TARGET_STEP = 20.0, 120.0, 30.0  # บัญชีจริง: ตรงกับ BOT_REAL_STOP_BALANCE / BOT_REAL_TARGET_BALANCE / BOT_REAL_TARGET_STEP ใน scripts/run_bot_exreal_*.bat (อัปเดต 2026-10-08)
+REAL_DAILY_LOSS_PCT = 60.0  # BOT_DAILY_LOSS_PCT ของบอทจริง (% ของ balance)
 UP, DOWN, GOLD, MA_FAST, MA_SLOW, MUTED = "#3cc08e", "#f0675c", "#d4a017", "#6b9cff", "#a3aab6", "#8a919c"
 ACTIONS = {
     "follow_trend": ("📈 เข้าตามเทรนด์ตอนนี้", "เข้าตามทิศ MA ปัจจุบันทันที ไม่ต้องรอ MA ตัดใหม่ — ยังผ่าน ADX / ข่าว / ลิมิต "
@@ -579,7 +580,7 @@ def move_stats_box() -> None:
     rows = []
     for tf, v in d.get("tf", {}).items():
         rows.append({"TF": tf, "ช่วงแท่งเฉลี่ย $": round(v["avg_range"], 2), "จุด (1$=100)": round(v["avg_range_pts"]), "เนื้อแท่ง $": round(v["avg_body"], 2),
-                     "ATR14 $": round(v["atr14"], 2), "ตอนนี้เทียบปกติ (24 ชม.)": f"{v['last24h']['ratio_range']:.2f}x · vol {v['last24h']['ratio_vol']:.2f}x"})
+                     "ATR14 $": round(v["atr14"], 2), "ตอนนี้เทียบปกติ (24 ชม.)": (f"{v['last24h']['ratio_range']:.2f}x · vol {v['last24h']['ratio_vol']:.2f}x" if v.get("last24h") else "-")})
     with st.expander("ค่าเฉลี่ยขึ้นลงต่อแท่งทุก timeframe + ภาวะตลาดตอนนี้", expanded=True):
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption(f"{d.get('point_note', '')} · ฐานเทียบ {d.get('baseline_days', '')} วันล่าสุด · volume ใช้เป็นตัวกรองความผันผวน ไม่ได้ทำนายทิศ")
@@ -959,22 +960,123 @@ def broker_compare_section(df: pd.DataFrame) -> None:
     st.caption("สัญญาณของสองโบรกเกอร์ไม่เหมือนกันเป๊ะ (ราคา/เวลาเซิร์ฟเวอร์/spread ต่าง) ใช้เทียบ 'ต้นทุนและความเป็นไปได้' ไม่ใช่เทียบไม้ต่อไม้ · ต้องมีไม้เยอะพอก่อนสรุป")
 
 
+def _daily_data() -> dict:
+    """ไฟล์ static จาก tools/daily_refresh.py (งานรายวัน 06:00) — ข่าวข้างหน้า, ผลวิเคราะห์, สถิติตัวกรอง volume (ไม่มีข้อมูลบัญชี)"""
+    try:
+        return json.loads(Path(__file__).with_name("daily_report.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def news_blocking_table() -> None:
+    d = _daily_data()
+    rows = d.get("news") or []
+    st.markdown("**ข่าว USD ใน 36 ชม. ข้างหน้า และบอทบล็อกไหม**")
+    if not rows:
+        st.caption("ยังไม่มีรายงานประจำวัน (งานรายวัน 06:00 ยังไม่รัน)")
+        return
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.caption(f"อัปเดต {d.get('generated', '-')} (เวลาเครื่อง) · บอทบล็อกก่อน/หลังข่าว 30 นาทีเฉพาะ m15b/m30b และเฉพาะข่าวความสำคัญ ≥3 · บอท M5 ไม่กรองข่าว")
+
+
+def daily_report_box() -> None:
+    d = _daily_data()
+    news_blocking_table()
+    an = d.get("analysis") or {}
+    for title, text in an.items():
+        with st.expander(title, expanded=False):
+            st.code(text, language=None)
+    if an:
+        st.caption("ผลวิเคราะห์เทียบข้อมูลราคาย้อนหลัง (SL 7.5 / TP 15) อัปเดตทุกเช้า — เป็นตัวชี้ ไม่ใช่การรับประกันกำไร")
+
+
+def volume_filter_box() -> None:
+    d = _daily_data()
+    vf = d.get("volume_filter") or {}
+    st.markdown("**ตัวกรอง volume (ทดสอบบนเดโม)**")
+    if not vf:
+        st.caption("ยังไม่มีสถิติ (รอรายงานประจำวัน)")
+        return
+    st.dataframe(pd.DataFrame([{"บอท (MetaQuotes เดโม)": k, **v} for k, v in vf.items()]), width="stretch", hide_index=True)
+    st.caption(d.get("volume_filter_note", ""))
+
+
+def normalized_section(df: pd.DataFrame, df_real: pd.DataFrame | None = None) -> None:
+    """เทียบบอทบนฐานเดียวกัน: กำไรต่อไม้ปรับเป็น 0.01 lot (เดโม MQ ใช้ 0.2 lot ตัวเลขดอลลาร์จึงเทียบกับบัญชีจริงตรงๆ ไม่ได้)"""
+    frames = [x for x in (df, df_real) if x is not None and len(x)]
+    if not frames:
+        st.info("ยังไม่มีไม้ที่ปิดแล้ว")
+        return
+    a = pd.concat(frames, ignore_index=True)
+    a = a[a["lot"].notna() & (a["lot"] > 0)].copy()
+    if a.empty:
+        return
+    a["ปรับ 0.01 lot $"] = a["กำไร $"] / (a["lot"] / 0.01)
+    rows = []
+    for name, g in a.groupby("บอท"):
+        days = max((g["ปิดเมื่อ"].max() - g["ปิดเมื่อ"].min()).total_seconds() / 86400, 1.0)
+        n = len(g)
+        rows.append({"บอท": name, "ไม้": n, "ไม้/วัน": round(n / days, 1), "ชนะ": f"{g['win'].mean():.0%}",
+                     "กำไรต่อไม้ (0.01 lot) $": round(g["ปรับ 0.01 lot $"].mean(), 2), "รวม (0.01 lot) $": round(g["ปรับ 0.01 lot $"].sum(), 2),
+                     "ความน่าเชื่อถือ": "น้อยเกินสรุป" if n < 30 else "พอใช้" if n < 100 else "ดี"})
+    st.markdown("**เทียบบอทบนฐาน 0.01 lot (เทียบกับบัญชีจริงได้)**")
+    st.dataframe(pd.DataFrame(rows).sort_values("กำไรต่อไม้ (0.01 lot) $", ascending=False), width="stretch", hide_index=True)
+    st.caption("ไม้น้อยกว่า 30 ไม้ = เป็นแค่ตัวชี้ ห้ามใช้ตัดสินว่าบอทตัวไหนดี/แย่ · ไม่รวมสเปรด/สลิปที่ต่างกันของแต่ละโบรกเกอร์")
+
+
+def real_summary_card(now: datetime) -> None:
+    """การ์ดบัญชีจริงบนสุด — แสดงเมื่อใส่ PIN แล้วเท่านั้น (repo นี้เป็นสาธารณะ)"""
+    if not real_unlocked():
+        return
+    docs = list(db.status.find({"server": {"$regex": "^Exness.*real", "$options": "i"}},
+                               {"profile": 1, "running": 1, "updated_at": 1, "balance": 1, "equity": 1, "positions": 1, "day_pnl": 1, "paused": 1, "halted_today": 1}))
+    if not docs:
+        return
+    ref = max(docs, key=lambda d: d.get("updated_at") or datetime.min.replace(tzinfo=timezone.utc))
+    bal, eq = float(ref.get("balance") or 0), float(ref.get("equity") or 0)
+    pos = [dict(p, bot=_pname(str(d.get("profile") or ""))) for d in docs for p in (d.get("positions") or [])]
+    day = sum(float(d.get("day_pnl") or 0) for d in docs)
+    limit = bal * REAL_DAILY_LOSS_PCT / 100
+    online = sum(1 for d in docs if _bot_state(d, now) != "🔴 ออฟไลน์")
+    with st.container(border=True):
+        st.markdown("**💰 บัญชีจริง (เงินจริง)**")
+        m = st.columns(5)
+        m[0].metric("Balance", f"{bal:,.2f}")
+        m[1].metric("Equity", f"{eq:,.2f}", f"ลอย {sum(float(p.get('profit') or 0) for p in pos):+,.2f}", delta_color="off", delta_arrow="off")
+        m[2].metric("วันนี้ รวมทุกบอท (UTC)", f"{day:+,.2f}", f"ลิมิตต่อบอท −${limit:,.0f}", delta_color="off", delta_arrow="off")
+        m[3].metric("เป้าถัดไป", f"${REAL_TARGET_BALANCE:g}", f"ห่าง ${REAL_TARGET_BALANCE - bal:,.2f} · ขยับทีละ ${REAL_TARGET_STEP:g}", delta_color="off", delta_arrow="off")
+        m[4].metric("บอทจริงออนไลน์", f"{online}/{len(docs)}", f"เส้นหยุด equity ${REAL_STOP_BALANCE:g}", delta_color="off", delta_arrow="off")
+        frac = min(max((bal - REAL_STOP_BALANCE) / (REAL_TARGET_BALANCE - REAL_STOP_BALANCE), 0.0), 1.0)
+        st.progress(frac, text=f"เส้นหยุด ${REAL_STOP_BALANCE:g} ←→ เป้า ${REAL_TARGET_BALANCE:g} · equity ห่างเส้นหยุด ${eq - REAL_STOP_BALANCE:,.2f}")
+        if pos:
+            pdf = pd.DataFrame(pos)
+            for c in ("side", "volume", "price_open", "sl", "tp", "profit"):
+                if c not in pdf:
+                    pdf[c] = np.nan
+            st.dataframe(pdf.rename(columns={"bot": "บอท", "side": "ทิศ", "volume": "lot", "price_open": "เข้า", "profit": "ลอย $"})[["บอท", "ทิศ", "lot", "เข้า", "sl", "tp", "ลอย $"]],
+                         width="stretch", hide_index=True)
+        else:
+            st.caption("ไม่มีไม้เปิดอยู่")
+
+
 def team_tab() -> None:
     st.subheader("ทีมบอททั้งหมด")
     df = trade_frame()
-    t1, t2, t3, t4, t5, t6 = st.tabs(["สถานะ & เป้า", "เทียบบอท", "ไม้ & สมุดบันทึก", "กราฟรวม", "ปิดมือเร็วไปไหม", "MetaQuotes vs Exness"])
+    t1, t2, t3 = st.tabs(["สถานะ & เป้า", "เทียบบอท", "ไม้ & วิเคราะห์"])
     with t1:
         status_goal_section()
     with t2:
+        normalized_section(df, trade_frame(real=True) if real_unlocked() else None)
         compare_section(df)
+        volume_filter_box()
+        with st.expander("MetaQuotes vs Exness", expanded=False):
+            broker_compare_section(df)
     with t3:
         journal_section(df)
-    with t4:
-        all_chart_section(df)
-    with t5:
-        early_close_section(df)
-    with t6:
-        broker_compare_section(df)
+        with st.expander("กราฟรวมทุกบอท", expanded=False):
+            all_chart_section(df)
+        with st.expander("ปิดมือเร็วไปไหม", expanded=False):
+            early_close_section(df)
 
 
 def acct_kind(server: str) -> str:
@@ -1209,28 +1311,44 @@ def ticker() -> None:
     c[4].metric("XAUUSD", f"{float(ref.get('bid') or 0):,.2f}", f"Ask {float(ref.get('ask') or 0):,.2f}", delta_color="off", delta_arrow="off")
 
 
-@st.fragment(run_every="15s")
-def live() -> None:
-    s = db.status.find_one({"_id": bot_id})
-    now = datetime.now(timezone.utc)
-    header(s, now)
-    trades = load_trades()
-    t8, t1, t2, t3, t4, t5, t7, t6 = st.tabs(["แยกตามบัญชี", "ภาพรวม", "กราฟ", "ข่าว", "สภาพตลาด", "ผลงาน", "ทีมบอท", "Log"])
-    with t8:
-        accounts_tab()
+def news_market_tab(s: dict, now: datetime) -> None:
+    t1, t2, t3 = st.tabs(["รายงานประจำวัน", "ข่าวจากบอท", "สภาพตลาด"])
+    with t1:
+        daily_report_box()
+    with t2:
+        news_tab(s, now)
+    with t3:
+        market_tab(now)
+
+
+def single_bot_tab(s: dict, now: datetime, trades: pd.DataFrame) -> None:
+    st.caption("รายละเอียดของบอทที่เลือกในแถบด้านข้าง (บัญชีรวมทุกตัวดูที่แท็บ 'แยกตามบัญชี' และ 'ทีมบอท')")
+    t1, t2, t3 = st.tabs(["ภาพรวม", "กราฟ", "ผลงาน"])
     with t1:
         overview_tab(s, now)
     with t2:
         chart_tab(s, now, trades)
     with t3:
-        news_tab(s, now)
-    with t4:
-        market_tab(now)
-    with t5:
         performance_tab(s, trades)
-    with t7:
+
+
+@st.fragment(run_every="15s")
+def live() -> None:
+    s = db.status.find_one({"_id": bot_id})
+    now = datetime.now(timezone.utc)
+    header(s, now)
+    real_summary_card(now)
+    trades = load_trades()
+    t_acct, t_team, t_news, t_bot, t_log = st.tabs(["แยกตามบัญชี", "ทีมบอท", "ข่าว & ตลาด", "บอทเดี่ยว", "Log"])
+    with t_acct:
+        accounts_tab()
+    with t_team:
         team_tab()
-    with t6:
+    with t_news:
+        news_market_tab(s, now)
+    with t_bot:
+        single_bot_tab(s, now, trades)
+    with t_log:
         log_tab()
 
 
