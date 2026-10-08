@@ -160,80 +160,12 @@ if not bot_ids:
     st.info("ยังไม่มีข้อมูลจากบอท — รัน bot.py ที่มี MONGODB_URI ใน .env แล้วรอสักครู่")
     st.stop()
 
-bot_id = st.sidebar.selectbox("บอท", bot_ids, format_func=lambda i: bot_labels.get(i, i)) if len(bot_ids) > 1 else bot_ids[0]
-days = st.sidebar.select_slider("กราฟ equity ย้อนหลัง", options=[1, 7, 30, 90, 365], value=30,
-                                format_func=lambda d: f"{d} วัน")
-n_bars = st.sidebar.select_slider("กราฟราคา (จำนวนแท่ง)", options=[60, 120, 200, 300], value=120)
+# บอทอ้างอิงสำหรับข่าว/ตลาด = m15b บน MetaQuotes (ไม่มีตัวเลือกบอทในแถบข้างแล้ว — หน้าแสดงทั้งทีม)
+bot_id = next((d["_id"] for d in _st if d.get("profile") == "m15b" and "metaquotes" in str(d.get("server", "")).lower()), bot_ids[0])
+days, n_bars = 30, 120
 
 
-# ---------- แผงควบคุม (อยู่นอก auto-refresh เพื่อไม่ให้ PIN ที่พิมพ์อยู่หาย) ----------
-def control_panel() -> None:
-    sb = st.sidebar
-    sb.divider()
-    sb.subheader("ควบคุมบอท")
-    pin_cfg, ctrl_uri = secret("CONTROL_PIN"), secret("MONGODB_CONTROL_URI")
-    if not pin_cfg or not ctrl_uri or "รหัส" in ctrl_uri or "<" in ctrl_uri:
-        missing = [n for n, ok in (("MONGODB_CONTROL_URI", ctrl_uri and "รหัส" not in ctrl_uri and "<" not in ctrl_uri),
-                                   ("CONTROL_PIN", pin_cfg)) if not ok]
-        sb.caption("ปิดอยู่ — ใน Secrets ยังขาด/ยังไม่ได้ใส่รหัสจริง: **" + ", ".join(missing) + "**  \n"
-                   "(MONGODB_CONTROL_URI = user ที่เขียนได้เฉพาะ db xauusd_bot, CONTROL_PIN = PIN ที่ตั้งเอง)")
-        return
-    tries = st.session_state.get("pin_fail", 0)
-    if tries >= MAX_PIN_TRIES:
-        sb.error("ใส่ PIN ผิดเกินกำหนด — โหลดหน้าใหม่เพื่อลองอีกครั้ง")
-        return
-    action = sb.radio("คำสั่ง", list(ACTIONS), format_func=lambda a: ACTIONS[a][0], key="ctl_action", index=None)
-    if action:
-        sb.caption(ACTIONS[action][1])
-    pin = sb.text_input("PIN", type="password", key="ctl_pin")
-    confirm = sb.checkbox("ยืนยันส่งคำสั่งนี้", key="ctl_confirm")
-    if sb.button("ส่งคำสั่ง", type="primary", disabled=not (confirm and action), width="stretch"):
-        if not hmac.compare_digest(pin.encode(), pin_cfg.encode()):
-            st.session_state.pin_fail = tries + 1
-            sb.error(f"PIN ไม่ถูกต้อง ({tries + 1}/{MAX_PIN_TRIES})")
-            return
-        try:
-            get_db("MONGODB_CONTROL_URI").commands.insert_one({
-                "bot_id": bot_id, "action": action, "status": "pending",
-                "created_at": datetime.now(timezone.utc), "requested_by": "dashboard"})
-            sb.success("ส่งคำสั่งแล้ว — บอทจะทำภายใน ~2 วินาที (ดูสถานะด้านล่าง)")
-        except PyMongoError as e:
-            sb.error(f"ส่งคำสั่งไม่ได้: {type(e).__name__} — เช็คสิทธิ์ของ user ใน MONGODB_CONTROL_URI")
-    with sb.expander("🚨 สั่งทุกบอทพร้อมกัน"):
-        all_action = st.radio("คำสั่งทุกบอท", ["close_all", "resume"], key="all_action", index=None,
-                              format_func=lambda a: {"close_all": "⛔ ปิดทุกไม้ + หยุดเข้าไม้ (ทุกบอท)", "resume": "▶ กลับมาเข้าไม้ (ทุกบอท)"}[a])
-        all_pin = st.text_input("PIN", type="password", key="all_pin")
-        typed = st.text_input('พิมพ์คำว่า "ทุกบอท" เพื่อยืนยัน', key="all_typed")
-        st.caption(f"จะส่งคำสั่งไปที่ {len(bot_ids)} บอททันที — ปิดทุกไม้ของทุกบอทที่ราคาตลาด (รวมไม้ที่ตั้งใจถือ) แล้วหยุดเข้าไม้ใหม่ · กู้คืนด้วย 'กลับมาเข้าไม้'")
-        if st.button("ส่งคำสั่งทุกบอท", type="primary", key="all_send", disabled=not (all_action and typed.strip() == "ทุกบอท"), width="stretch"):
-            if not hmac.compare_digest(all_pin.encode(), pin_cfg.encode()):
-                st.session_state.pin_fail = st.session_state.get("pin_fail", 0) + 1
-                st.error("PIN ไม่ถูกต้อง")
-            else:
-                try:
-                    now_ = datetime.now(timezone.utc)
-                    get_db("MONGODB_CONTROL_URI").commands.insert_many([
-                        {"bot_id": i, "action": all_action, "status": "pending", "created_at": now_, "requested_by": "dashboard (ทุกบอท)"} for i in bot_ids])
-                    st.success(f"ส่งคำสั่ง {all_action} ไปทุกบอท ({len(bot_ids)} ตัว) แล้ว — แต่ละบอททำภายใน ~2 วินาที")
-                except PyMongoError as e:
-                    st.error(f"ส่งคำสั่งไม่ได้: {type(e).__name__}")
-    with sb:
-        command_status()
-
-
-@st.fragment(run_every="2s")
-def command_status() -> None:
-    """สถานะคำสั่งล่าสุด รีเฟรชเองทุก 2 วินาที (แยกจากส่วนอื่น จะได้ไม่ล้าง PIN ที่พิมพ์อยู่)"""
-    cmds = list(db.commands.find({"bot_id": bot_id}).sort("created_at", DESCENDING).limit(5))
-    if cmds:
-        icon = {"pending": "🕓", "received": "⚙️", "done": "✅", "error": "⛔", "expired": "⌛"}
-        st.caption("คำสั่งล่าสุด")
-        for c in cmds:
-            st.markdown(f"{icon.get(c['status'], '•')} {th_time(c['created_at'])} **{ACTIONS.get(c['action'], (c['action'],))[0]}**"
-                        + (f"  \n<small>{c.get('result', '')}</small>" if c.get("result") else ""), unsafe_allow_html=True)
-
-
-control_panel()
+# 2026-10-08 (ผู้ใช้สั่ง): ถอดแผงควบคุม/ปุ่มสั่งเข้า-ออกไม้ออก — dashboard ดูข้อมูลอย่างเดียว
 
 
 # ---------- ส่วนแสดงผล ----------
@@ -582,7 +514,7 @@ def move_stats_box() -> None:
         rows.append({"TF": tf, "ช่วงแท่งเฉลี่ย $": round(v["avg_range"], 2), "จุด (1$=100)": round(v["avg_range_pts"]), "เนื้อแท่ง $": round(v["avg_body"], 2),
                      "ATR14 $": round(v["atr14"], 2), "ตอนนี้เทียบปกติ (24 ชม.)": (f"{v['last24h']['ratio_range']:.2f}x · vol {v['last24h']['ratio_vol']:.2f}x" if v.get("last24h") else "-")})
     with st.expander("ค่าเฉลี่ยขึ้นลงต่อแท่งทุก timeframe + ภาวะตลาดตอนนี้", expanded=True):
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         st.caption(f"{d.get('point_note', '')} · ฐานเทียบ {d.get('baseline_days', '')} วันล่าสุด · volume ใช้เป็นตัวกรองความผันผวน ไม่ได้ทำนายทิศ")
 
 
@@ -640,7 +572,7 @@ def market_tab(now: datetime) -> None:
 @st.cache_data(ttl=60, show_spinner=False)
 def load_all_trades() -> list[dict]:
     return list(db.trades.find({}, {"_id": 0, "bot_id": 1, "close_time": 1, "open_time": 1, "net_profit": 1, "r_multiple": 1, "source": 1, "side": 1,
-                                    "entry_price": 1, "exit_price": 1, "exit_reason": 1, "lot": 1, "sl": 1, "tier": 1, "tp_usd": 1,
+                                    "entry_price": 1, "exit_price": 1, "exit_reason": 1, "entry_reason": 1, "lot": 1, "sl": 1, "tier": 1, "tp_usd": 1,
                                     "spread_pts": 1, "slippage_pts": 1, "ticket": 1, "features": 1}))
 
 
@@ -1105,10 +1037,10 @@ def pass_criteria_tab() -> None:
         else:
             verdict = "❌ ยังไม่ผ่าน"
         rows.append({"บอท": prof, "ผล": verdict, "ไม้": n, "ชนะ %": round(a["win"].mean() * 100) if n else None,
-                     "avgR": round(avg_r, 3) if n else None, "t": round(t_stat, 2) if t_stat == t_stat else None, "กำไร $ (0.01 lot)": round(total, 2),
+                     "avgR": round(avg_r, 3) if n else None, "t": round(t_stat, 2) if t_stat == t_stat else None, "กำไร $": round(total, 2),
                      "2 ไม้ดีสุด / กำไรรวม": f"{share:.0%}" if share == share else "-", "แพ้ติดกันสูงสุด": streak_l,
                      "ไม้ปิดมือ (ไม่นับ)": manual, **{k: "✅" if v else "·" for k, v in checks.items()}})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     passed = [r["บอท"] for r in rows if r["ผล"].startswith("✅")]
     if passed:
         st.success(f"ผ่านเกณฑ์: {', '.join(passed)} — ขั้นถัดไปคือเงินจริงขนาดเล็ก (บัญชี Cent, เสี่ยง ≤ 1-2%/ไม้) และต้องเป็นคำสั่งของผู้ใช้เอง")
@@ -1402,28 +1334,108 @@ def single_bot_tab(s: dict, now: datetime, trades: pd.DataFrame) -> None:
         performance_tab(s, trades)
 
 
+# ---------- หน้าดูข้อมูลทีม (2026-10-08): สถานะ + เหตุผลเข้า/ออกของทุกไม้ ----------
+def exit_kind(reason: str, profit: float) -> str:
+    r = str(reason or "")
+    if "TP" in r:
+        return "✅ เอากำไร (ชน TP)"
+    if "SL" in r:
+        return "🟢 ล็อกกำไร (SL ที่เลื่อนแล้ว)" if profit > 0 else "🛑 ตัดขาดทุน (ชน SL)"
+    if "หมดเวลา" in r:
+        return "⏱ หมดเวลาถือ"
+    if "deal reason 3" in r or "close all" in r:
+        return "🌙 ปิดก่อนปิดคอม 01:00"
+    if "มือ" in r or "dashboard" in r:
+        return "✋ ปิดมือ"
+    return r or "-"
+
+
+def team_status_section(now: datetime) -> None:
+    docs = {d.get("profile"): d for d in db.status.find({"profile": {"$in": TEST_PROFILES}}, {"indicators": 0, "upcoming_news": 0, "recent_news": 0, "params_info": 0, "expected": 0})
+            if "metaquotes" in str(d.get("server", "")).lower()}
+    if not docs:
+        st.info("ยังไม่มีข้อมูลสถานะจากบอท")
+        return
+    any_doc = next(iter(docs.values()))
+    c = st.columns(4)
+    c[0].metric("Balance เดโม", f"{any_doc.get('balance', 0):,.2f}")
+    c[1].metric("Equity", f"{any_doc.get('equity', 0):,.2f}", f"{any_doc.get('equity', 0) - any_doc.get('balance', 0):+,.2f} ลอย")
+    open_n = sum(len(d.get("positions") or []) for d in docs.values())
+    c[2].metric("ไม้ที่เปิดอยู่", f"{open_n} / 3")
+    c[3].metric("ราคา Bid", f"{any_doc.get('bid', 0):,.2f}")
+    rows, opens = [], []
+    for prof in TEST_PROFILES:
+        d = docs.get(prof)
+        if not d:
+            rows.append({"บอท": PROFILE_NAMES.get(prof, prof), "สถานะ": "❔ ไม่มีข้อมูล"})
+            continue
+        age = (now - d["updated_at"]).total_seconds()
+        online = d.get("running", False) and age < OFFLINE_AFTER_S
+        cfg = d.get("config") or {}
+        pos = d.get("positions") or []
+        rows.append({"บอท": PROFILE_NAMES.get(prof, prof), "กรอบเวลา": cfg.get("timeframe", ""),
+                     "สถานะ": "🟢 ทำงาน" if online else f"🔴 เงียบ {ago(age)}",
+                     "lot สูงสุด": cfg.get("max_lot"), "ไม้วันนี้": d.get("entries_today", 0),
+                     "กำไรวันนี้ $": round(d.get("day_pnl", 0) or 0, 2),
+                     "ถือไม้": ", ".join(f"{p['side']} {p['volume']} ({p['profit']:+.2f})" for p in pos) or "-",
+                     "อัปเดต": th_time(d["updated_at"])})
+        for p in pos:
+            opens.append({"บอท": prof, "ทิศ": p["side"], "lot": p["volume"], "เข้า": p["price_open"], "ตอนนี้": p["price_current"],
+                          "SL": p["sl"], "TP": p.get("tp"), "กำไร $": round(p["profit"], 2), "เปิดเมื่อ": p.get("open_time"),
+                          "เหตุผลที่เข้า": p.get("entry_reason") or "-"})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.markdown("**ไม้ที่เปิดอยู่ และเหตุผลที่เข้า**")
+    if opens:
+        st.dataframe(pd.DataFrame(opens), hide_index=True, width="stretch")
+    else:
+        st.caption("ไม่มีไม้ที่เปิดอยู่ — บอทรอสัญญาณตอนแท่งปิด (เข้าไม้ใหม่เฉพาะ 05:00-13:00 และ 19:00-01:00)")
+
+
+def trades_reason_section() -> None:
+    df = trade_frame()
+    if df.empty:
+        st.info("ยังไม่มีไม้ที่ปิดแล้ว")
+        return
+    df = df[(df["โบรกเกอร์"] == "MetaQuotes") & df["โปรไฟล์"].isin(TEST_PROFILES)]
+    only_test = st.toggle(f"เฉพาะช่วงทดสอบ (ตั้งแต่ {TEST_START_TH:%d/%m %H:%M})", value=True, key="tr_only_test")
+    if only_test:
+        df = df[df["เปิดเมื่อ"] >= TEST_START_TH]
+    if df.empty:
+        st.info("ยังไม่มีไม้ที่ปิดในช่วงนี้ — บอทกลุ่มนี้เข้าไม้ไม่บ่อย (ราว 1-2 ไม้/สัปดาห์/ตัว)")
+        return
+    df = df.copy()
+    df["ผลการออก"] = [exit_kind(r, p) for r, p in zip(df["exit_reason"], df["กำไร $"])]
+    s = df.groupby("โปรไฟล์").agg(ไม้=("กำไร $", "size"), ชนะ=("win", "sum"), กำไร_รวม=("กำไร $", "sum"), avgR=("R", "mean"))
+    kinds = df.pivot_table(index="โปรไฟล์", columns="ผลการออก", values="กำไร $", aggfunc="size", fill_value=0)
+    s = s.join(kinds).reset_index().rename(columns={"โปรไฟล์": "บอท", "กำไร_รวม": "กำไร $"})
+    s["กำไร $"] = s["กำไร $"].round(2); s["avgR"] = s["avgR"].round(3)
+    st.markdown("**สรุปต่อบอท: เอากำไรกี่ครั้ง ตัดขาดทุนกี่ครั้ง**")
+    st.dataframe(s, hide_index=True, width="stretch")
+    st.markdown("**ทุกไม้ (ล่าสุดก่อน) พร้อมเหตุผลเข้าและออก**")
+    show = df.sort_values("ปิดเมื่อ", ascending=False)[["ปิดเมื่อ", "โปรไฟล์", "side", "lot", "entry_price", "exit_price", "กำไร $", "R", "ผลการออก", "entry_reason", "exit_reason", "ถือ (นาที)"]]
+    show = show.rename(columns={"โปรไฟล์": "บอท", "side": "ทิศ", "entry_price": "เข้า", "exit_price": "ออก", "entry_reason": "เหตุผลที่เข้า", "exit_reason": "เหตุผลที่ออก (MT5)"})
+    st.dataframe(show, hide_index=True, width="stretch",
+                 column_config={"ปิดเมื่อ": st.column_config.DatetimeColumn(format="DD/MM HH:mm"), "เหตุผลที่เข้า": st.column_config.TextColumn(width="large")})
+
+
 @st.fragment(run_every="15s")
 def live() -> None:
-    s = db.status.find_one({"_id": bot_id})
     now = datetime.now(timezone.utc)
-    header(s, now)
-    real_summary_card(now)
-    trades = load_trades()
-    t_pass, t_acct, t_team, t_news, t_bot, t_log = st.tabs(["เกณฑ์ผ่าน", "แยกตามบัญชี", "ทีมบอท", "ข่าว & ตลาด", "บอทเดี่ยว", "Log"])
+    st.title("ทีมบอท XAUUSD (เดโม)")
+    st.caption("ดูข้อมูลอย่างเดียว · กลุ่ม M15: m15b m15sq m15roc · กลุ่ม M30: m30b m30sq m30mom · SL $10 · "
+               "เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00 · เพดาน 2 ไม้/กลุ่ม 3 ไม้รวม")
+    t_status, t_trades, t_pass, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "เกณฑ์ผ่าน", "ข่าว & ตลาด"])
+    with t_status:
+        team_status_section(now)
+    with t_trades:
+        trades_reason_section()
     with t_pass:
         pass_criteria_tab()
-    with t_acct:
-        accounts_tab()
-    with t_team:
-        team_tab()
     with t_news:
-        news_market_tab(s, now)
-    with t_bot:
-        single_bot_tab(s, now, trades)
-    with t_log:
-        log_tab()
+        s = db.status.find_one({"_id": bot_id})
+        if s:
+            news_market_tab(s, now)
 
 
-sidebar_real_unlock()
 ticker()
 live()
