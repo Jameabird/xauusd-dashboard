@@ -143,7 +143,7 @@ try:
     def _pname(prof: str) -> str:
         acct, base = (("Exness จริง · ", prof[7:]) if prof.startswith("exreal-") else ("Exness · ", prof[3:]) if prof.startswith("ex-") else ("", prof))
         return acct + PROFILE_NAMES.get(base, base)
-    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)", "m15b": "m15b · breakout M15 (ทดสอบ)"}
+    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)", "m15b": "m15b · breakout M15 (ทดสอบ)", "m15sq": "m15sq · squeeze M15", "m15roc": "m15roc · momentum M15", "m30sq": "m30sq · squeeze M30", "m30mom": "m30mom · momentum M30"}
     bot_labels = {d["_id"]: f"{_pname(d.get('profile', 'main'))} · "
                             f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
@@ -1060,9 +1060,10 @@ def real_summary_card(now: datetime) -> None:
 
 
 # ---------- เกณฑ์ผ่านก่อนกลับไปเงินจริง (ตั้ง 2026-10-08) ----------
-TEST_START_TH = pd.Timestamp("2026-10-08 21:53")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
-TEST_PROFILES = ["m15b", "m30b"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
+TEST_START_TH = pd.Timestamp("2026-10-08 22:05")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
+TEST_PROFILES = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
 PASS_MIN_TRADES, PASS_GOOD_TRADES = 30, 50
+PASS_MIN_T = 1.5  # research/results/team_consensus.md: แค่ avgR > 0 บอทที่ไม่มี edge ก็ผ่านได้ ~50% → ต้อง t ≥ 1.5 ด้วย
 PASS_MAX_TOP2_SHARE = 0.5  # กำไรจาก 2 ไม้ดีสุดต้องไม่เกินครึ่งของกำไรรวม (ไม่พึ่งไม้ใหญ่ 1-2 ไม้)
 STOP_AFTER_N, STOP_AVG_R, STOP_LOSS_STREAK = 15, -0.3, 8  # จุดตัด "แพ้เกินเกณฑ์ ให้หยุดทบทวน"
 
@@ -1087,11 +1088,13 @@ def pass_criteria_tab() -> None:
         a = d[(d["ปิดโดย"] != "ปิดมือ") & (d["ที่มา"] == "signal")] if len(d) else d
         n = len(a)
         avg_r = float(a["R"].mean()) if n else float("nan")
+        sd = float(a["R"].std(ddof=1)) if n > 1 else float("nan")
+        t_stat = avg_r / (sd / n ** 0.5) if sd and sd == sd else float("nan")
         total = float(a["กำไร $"].sum()) if n else 0.0
         top2 = float(a["กำไร $"].nlargest(2).clip(lower=0).sum()) if n else 0.0
         share = top2 / total if total > 0 else float("nan")
         streak_l = _max_streak(list(a["win"])) if n else 0
-        checks = {"ไม้ ≥ 30": n >= PASS_MIN_TRADES, "avgR > 0": n > 0 and avg_r > 0,
+        checks = {"ไม้ ≥ 30": n >= PASS_MIN_TRADES, "avgR > 0": n > 0 and avg_r > 0, "t ≥ 1.5": t_stat == t_stat and t_stat >= PASS_MIN_T,
                   "ไม่พึ่ง 2 ไม้ใหญ่": total > 0 and share <= PASS_MAX_TOP2_SHARE, "ไม่มีไม้ปิดมือ": manual == 0}
         if (n >= STOP_AFTER_N and avg_r < STOP_AVG_R) or streak_l >= STOP_LOSS_STREAK:
             verdict = "🛑 หยุดทบทวน"
@@ -1102,7 +1105,7 @@ def pass_criteria_tab() -> None:
         else:
             verdict = "❌ ยังไม่ผ่าน"
         rows.append({"บอท": prof, "ผล": verdict, "ไม้": n, "ชนะ %": round(a["win"].mean() * 100) if n else None,
-                     "avgR": round(avg_r, 3) if n else None, "กำไร $ (0.01 lot)": round(total, 2),
+                     "avgR": round(avg_r, 3) if n else None, "t": round(t_stat, 2) if t_stat == t_stat else None, "กำไร $ (0.01 lot)": round(total, 2),
                      "2 ไม้ดีสุด / กำไรรวม": f"{share:.0%}" if share == share else "-", "แพ้ติดกันสูงสุด": streak_l,
                      "ไม้ปิดมือ (ไม่นับ)": manual, **{k: "✅" if v else "·" for k, v in checks.items()}})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
@@ -1115,7 +1118,7 @@ def pass_criteria_tab() -> None:
         f"""
 **เกณฑ์ผ่าน (ต้องครบทุกข้อ ต่อบอท)**
 - ไม้ที่บอทเปิดเองและปิดเอง **≥ {PASS_MIN_TRADES} ไม้** (แนะนำ {PASS_GOOD_TRADES})
-- **avgR > 0** หลังหักต้นทุนจริง (สเปรด/slippage อยู่ในกำไรสุทธิแล้ว)
+- **avgR > 0** หลังหักต้นทุนจริง (สเปรด/slippage อยู่ในกำไรสุทธิแล้ว) และ **t ≥ {PASS_MIN_T}** (กันผ่านเพราะดวง)
 - กำไรจาก 2 ไม้ดีสุด **≤ {PASS_MAX_TOP2_SHARE:.0%}** ของกำไรรวม
 - ไม่มีไม้ปิดมือ และไม่เปลี่ยนค่าระหว่างทดสอบ
 
