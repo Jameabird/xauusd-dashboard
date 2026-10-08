@@ -1059,6 +1059,73 @@ def real_summary_card(now: datetime) -> None:
             st.caption("ไม่มีไม้เปิดอยู่")
 
 
+# ---------- เกณฑ์ผ่านก่อนกลับไปเงินจริง (ตั้ง 2026-10-08) ----------
+TEST_START_TH = pd.Timestamp("2026-10-08 21:53")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
+TEST_PROFILES = ["m15b", "m30b"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
+PASS_MIN_TRADES, PASS_GOOD_TRADES = 30, 50
+PASS_MAX_TOP2_SHARE = 0.5  # กำไรจาก 2 ไม้ดีสุดต้องไม่เกินครึ่งของกำไรรวม (ไม่พึ่งไม้ใหญ่ 1-2 ไม้)
+STOP_AFTER_N, STOP_AVG_R, STOP_LOSS_STREAK = 15, -0.3, 8  # จุดตัด "แพ้เกินเกณฑ์ ให้หยุดทบทวน"
+
+
+def _max_streak(wins: list[bool]) -> int:
+    best = cur = 0
+    for w in wins:
+        cur = 0 if w else cur + 1
+        best = max(best, cur)
+    return best
+
+
+def pass_criteria_tab() -> None:
+    st.subheader("เกณฑ์ผ่าน ก่อนกลับไปเทรดเงินจริง")
+    st.caption(f"นับเฉพาะไม้บนเดโม MetaQuotes ที่บอทเปิดเองและปิดเอง (SL/TP/หมดเวลา) ตั้งแต่ {TEST_START_TH:%d/%m/%Y %H:%M} น. · "
+               "ห้ามเปลี่ยนค่าบอทระหว่างทดสอบ — ถ้าเปลี่ยน ต้องเริ่มนับใหม่")
+    df = trade_frame()
+    rows = []
+    for prof in TEST_PROFILES:
+        d = df[(df["โปรไฟล์"] == prof) & (df["โบรกเกอร์"] == "MetaQuotes") & (df["เปิดเมื่อ"] >= TEST_START_TH)] if not df.empty else df
+        manual = int((d["ปิดโดย"] == "ปิดมือ").sum() + (d["ที่มา"] != "signal").sum()) if len(d) else 0
+        a = d[(d["ปิดโดย"] != "ปิดมือ") & (d["ที่มา"] == "signal")] if len(d) else d
+        n = len(a)
+        avg_r = float(a["R"].mean()) if n else float("nan")
+        total = float(a["กำไร $"].sum()) if n else 0.0
+        top2 = float(a["กำไร $"].nlargest(2).clip(lower=0).sum()) if n else 0.0
+        share = top2 / total if total > 0 else float("nan")
+        streak_l = _max_streak(list(a["win"])) if n else 0
+        checks = {"ไม้ ≥ 30": n >= PASS_MIN_TRADES, "avgR > 0": n > 0 and avg_r > 0,
+                  "ไม่พึ่ง 2 ไม้ใหญ่": total > 0 and share <= PASS_MAX_TOP2_SHARE, "ไม่มีไม้ปิดมือ": manual == 0}
+        if (n >= STOP_AFTER_N and avg_r < STOP_AVG_R) or streak_l >= STOP_LOSS_STREAK:
+            verdict = "🛑 หยุดทบทวน"
+        elif all(checks.values()):
+            verdict = "✅ ผ่าน" + (" (ครบ 50 ไม้)" if n >= PASS_GOOD_TRADES else " (แนะนำเก็บให้ครบ 50)")
+        elif n < PASS_MIN_TRADES:
+            verdict = f"⏳ เก็บข้อมูล {n}/{PASS_MIN_TRADES}"
+        else:
+            verdict = "❌ ยังไม่ผ่าน"
+        rows.append({"บอท": prof, "ผล": verdict, "ไม้": n, "ชนะ %": round(a["win"].mean() * 100) if n else None,
+                     "avgR": round(avg_r, 3) if n else None, "กำไร $ (0.01 lot)": round(total, 2),
+                     "2 ไม้ดีสุด / กำไรรวม": f"{share:.0%}" if share == share else "-", "แพ้ติดกันสูงสุด": streak_l,
+                     "ไม้ปิดมือ (ไม่นับ)": manual, **{k: "✅" if v else "·" for k, v in checks.items()}})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    passed = [r["บอท"] for r in rows if r["ผล"].startswith("✅")]
+    if passed:
+        st.success(f"ผ่านเกณฑ์: {', '.join(passed)} — ขั้นถัดไปคือเงินจริงขนาดเล็ก (บัญชี Cent, เสี่ยง ≤ 1-2%/ไม้) และต้องเป็นคำสั่งของผู้ใช้เอง")
+    else:
+        st.info("ยังไม่มีบอทผ่านเกณฑ์ — บัญชีจริงคงปิดไว้")
+    st.markdown(
+        f"""
+**เกณฑ์ผ่าน (ต้องครบทุกข้อ ต่อบอท)**
+- ไม้ที่บอทเปิดเองและปิดเอง **≥ {PASS_MIN_TRADES} ไม้** (แนะนำ {PASS_GOOD_TRADES})
+- **avgR > 0** หลังหักต้นทุนจริง (สเปรด/slippage อยู่ในกำไรสุทธิแล้ว)
+- กำไรจาก 2 ไม้ดีสุด **≤ {PASS_MAX_TOP2_SHARE:.0%}** ของกำไรรวม
+- ไม่มีไม้ปิดมือ และไม่เปลี่ยนค่าระหว่างทดสอบ
+
+**จุดตัด "แพ้เกินเกณฑ์ ให้หยุด"**: ครบ {STOP_AFTER_N} ไม้แล้ว avgR < {STOP_AVG_R} หรือแพ้ติดกัน ≥ {STOP_LOSS_STREAK} ไม้
+
+**กติกาเงินจริงหลังผ่าน**: เสี่ยงไม่เกิน 1-2% ของบัญชีต่อไม้ (ทุนน้อยใช้บัญชี Cent) · ไม่เปิดไม้มือที่ไม่มี SL · ไม่เพิ่ม lot เพื่อเอาคืน
+"""
+    )
+
+
 def team_tab() -> None:
     st.subheader("ทีมบอททั้งหมด")
     df = trade_frame()
@@ -1339,7 +1406,9 @@ def live() -> None:
     header(s, now)
     real_summary_card(now)
     trades = load_trades()
-    t_acct, t_team, t_news, t_bot, t_log = st.tabs(["แยกตามบัญชี", "ทีมบอท", "ข่าว & ตลาด", "บอทเดี่ยว", "Log"])
+    t_pass, t_acct, t_team, t_news, t_bot, t_log = st.tabs(["เกณฑ์ผ่าน", "แยกตามบัญชี", "ทีมบอท", "ข่าว & ตลาด", "บอทเดี่ยว", "Log"])
+    with t_pass:
+        pass_criteria_tab()
     with t_acct:
         accounts_tab()
     with t_team:
