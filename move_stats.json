@@ -1,6 +1,6 @@
 {
  "symbol": "XAUUSDm",
- "point_note": "Exness raw point=0.001; 'points' use 1 USD=100 points",
+ "point_note": "1 USD = 100 points",
  "baseline_days": 180,
  "tf": {
   "M1": {

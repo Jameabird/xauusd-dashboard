@@ -103,7 +103,8 @@ if not secret("MONGODB_URI"):
 db = get_db("MONGODB_URI")
 
 # บอทที่ปลดแล้ว (2026-10-06: ไม่เคยเข้าไม้จากสัญญาณ) — ซ่อนจากทุกหน้า ข้อมูลยังอยู่ใน DB (ประวัติไม้ที่ปิดแล้วยังนับในกำไรรวม)
-RETIRED_BOT_IDS = ["10012984221-20261003", "10012984221-20261004", "10012984221-20261006", "414406827-20261006"]  # main, re3, bo, ex-bo
+RETIRED_BOT_IDS = ["10012984221-20261003", "10012984221-20261004", "10012984221-20261006", "414406827-20261006",  # main, re3, bo, ex-bo
+                   "10012984221-20261005", "10012984221-20261007", "10012984221-20261008", "10012984221-20261009"]  # hf, msc, rsc, bsc (ปลด 2026-10-08)
 
 
 class _VisibleStatus:
@@ -111,7 +112,8 @@ class _VisibleStatus:
         self._c = coll
 
     def _q(self, q):
-        return {"$and": [q or {}, {"_id": {"$nin": RETIRED_BOT_IDS}}]}
+        # 2026-10-08: เทรดบน MetaQuotes เดโมอย่างเดียว — ซ่อนบอท Exness (เดโม/จริง) ทั้งหมด ข้อมูลยังอยู่ใน DB
+        return {"$and": [q or {}, {"_id": {"$nin": RETIRED_BOT_IDS}}, {"server": {"$not": {"$regex": "^Exness", "$options": "i"}}}]}
 
     def find(self, q=None, *a, **k):
         return self._c.find(self._q(q), *a, **k)
@@ -589,7 +591,7 @@ def load_m5_bars(bot_ids_m5: tuple) -> pd.DataFrame:
 
 def trade_frame(real: bool = False) -> pd.DataFrame:
     """ไม้ที่ปิดแล้วของบอท — real=False ไม่รวมบัญชีจริง (กันโผล่ในหน้าสาธารณะ), real=True เฉพาะบัญชีจริง (เรียกหลังใส่ PIN เท่านั้น)"""
-    docs = [x for x in load_all_trades() if (x.get("bot_id") in real_ids) == real]
+    docs = [x for x in load_all_trades() if (x.get("bot_id") in real_ids) == real and x.get("bot_id") in server_by_bot]
     if not docs:
         return pd.DataFrame()
     df = pd.DataFrame(docs)
@@ -1285,28 +1287,19 @@ def accounts_tab() -> None:
 
 @st.fragment(run_every="3s")
 def ticker() -> None:
-    """แถบสรุปบนสุด อัปเดตทุก 3 วินาที (ดึงเฉพาะฟิลด์เบา ๆ) — เห็นกำไรทีม/ไม้เปิด/บอทออนไลน์แบบเกือบเรียลไทม์"""
+    """แถบสรุปบนสุด: บัญชี MetaQuotes เดโม · ไม้เปิด/กำไรลอย · บอทออนไลน์ · equity · ราคา"""
     now_utc = datetime.now(timezone.utc)
-    docs = list(db.status.find({"server": {"$not": {"$regex": "^Exness", "$options": "i"}}},
-                               {"balance": 1, "equity": 1, "bid": 1, "ask": 1, "positions": 1, "day_pnl": 1, "updated_at": 1, "running": 1}))
-    ex_docs = list(db.status.find({"server": {"$regex": "^Exness(?!.*real)", "$options": "i"}}, {"equity": 1, "positions": 1, "updated_at": 1, "running": 1}))
+    docs = list(db.status.find({},
+                               {"login": 1, "balance": 1, "equity": 1, "bid": 1, "ask": 1, "positions": 1, "day_pnl": 1, "updated_at": 1, "running": 1}))
     if not docs:
         return
     online = sum(1 for d in docs if d.get("running") and d.get("updated_at") is not None and
                  (now_utc - (d["updated_at"] if d["updated_at"].tzinfo else d["updated_at"].replace(tzinfo=timezone.utc))).total_seconds() < 60)
     pos = [p for d in docs for p in (d.get("positions") or [])]
-    floating = sum(float(p.get("profit") or 0) for p in pos)
+    floating = sum(float(p.get("profit") or 0) for d in docs for p in (d.get("positions") or []))
     ref = max(docs, key=lambda d: d.get("updated_at") or datetime.min.replace(tzinfo=timezone.utc))
-    goal = db.team.find_one({"_id": "goal"}, {"team_pnl": 1, "target": 1, "target_reached": 1, "halt_all": 1})
-    c = st.columns(6 if ex_docs else 5)
-    if ex_docs:
-        exf = sum(float(p.get("profit") or 0) for d in ex_docs for p in (d.get("positions") or []))
-        c[5].metric("Exness Demo", f"{max((float(d.get('equity') or 0) for d in ex_docs), default=0):,.2f}",
-                    f"ไม้เปิด {sum(len(d.get('positions') or []) for d in ex_docs)} · ลอย {exf:+,.2f}", delta_color="off", delta_arrow="off")
-    if goal:
-        tgt, pnl = float(goal.get("target") or 1000), float(goal.get("team_pnl") or 0)
-        c[0].metric("กำไรรวมทีม", f"{pnl:+,.2f}", f"{pnl / tgt:.0%} ของเป้า ${tgt:,.0f}" + (" ✅" if goal.get("target_reached") else " 🛑" if goal.get("halt_all") else ""),
-                    delta_color="off", delta_arrow="off")
+    c = st.columns(5)
+    c[0].metric("บัญชี", "MetaQuotes เดโม", f"#{ref.get('login', '')}", delta_color="off", delta_arrow="off")
     c[1].metric("ไม้เปิด / กำไรลอย", f"{len(pos)} ไม้", f"{floating:+,.2f} USD", delta_color="off", delta_arrow="off")
     c[2].metric("บอทออนไลน์", f"{online}/{len(docs)}")
     c[3].metric("Equity", f"{float(ref.get('equity') or 0):,.2f}", f"Balance {float(ref.get('balance') or 0):,.2f}", delta_color="off", delta_arrow="off")
