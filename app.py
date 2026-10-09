@@ -1343,6 +1343,60 @@ def exit_kind(reason: str, profit: float) -> str:
     return r or "-"
 
 
+# ---------- สรุปวันนี้ + "รออะไรอยู่" (entry_watch.py ส่งขึ้น Mongo ทุกนาทีจาก league.py) ----------
+TEAM6 = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom"]
+
+
+def today_strip() -> None:
+    """กำไร/ขาดทุนที่ปิดแล้ววันนี้ (เวลาไทย) แยกกลุ่ม: ทีมนับเกณฑ์ 6 · บอทสำรวจ 6 · ลีกส่งออเดอร์จริง 48"""
+    today = datetime.now(TH).date()
+    df = trade_frame()
+    team = expl = 0.0
+    nt = ne = 0
+    if not df.empty:
+        d0 = df[(df["โบรกเกอร์"] == "MetaQuotes") & (df["ปิดเมื่อ"].dt.date == today)]
+        a = d0[d0["โปรไฟล์"].isin(TEAM6)]; b = d0[d0["โปรไฟล์"].isin(TEST_PROFILES) & ~d0["โปรไฟล์"].isin(TEAM6)]
+        team, nt, expl, ne = float(a["กำไร $"].sum()), len(a), float(b["กำไร $"].sum()), len(b)
+    lg = n_lg = 0.0
+    try:
+        for x in db.league_trades.find({}, {"_id": 0, "close_time": 1, "pnl_usd": 1, "real_pnl": 1, "real": 1}).sort("close_time", DESCENDING).limit(400):
+            ct = pd.to_datetime(x.get("close_time"), errors="coerce", utc=True)
+            if pd.notna(ct) and ct.tz_convert("Asia/Bangkok").date() == today:
+                lg += float(x.get("real_pnl") if x.get("real") and x.get("real_pnl") is not None else x.get("pnl_usd") or 0.0); n_lg += 1
+    except Exception:
+        pass
+    c = st.columns(3)
+    c[0].metric("ทีมนับเกณฑ์ 6 ตัว วันนี้", f"{team:+,.2f} $", f"ปิดแล้ว {nt} ไม้", delta_color="off", delta_arrow="off")
+    c[1].metric("บอทสำรวจ 6 ตัว วันนี้", f"{expl:+,.2f} $", f"ปิดแล้ว {ne} ไม้", delta_color="off", delta_arrow="off")
+    c[2].metric("ลีก 48 ตัว วันนี้ (จริง)", f"{lg:+,.2f} $", f"ปิดแล้ว {int(n_lg)} ไม้", delta_color="off", delta_arrow="off")
+
+
+def watch_section() -> None:
+    w = db.entry_watch.find_one({"_id": "now"})
+    st.markdown("**ตอนนี้แต่ละบอทรออะไรอยู่**")
+    if not w:
+        st.caption("ยังไม่มีข้อมูล (league.py เขียนทุกนาที)")
+        return
+    age = (datetime.now(timezone.utc) - datetime.fromtimestamp(float(w["ts"]), timezone.utc)).total_seconds()
+    h = w.get("htf") or {}
+    trend = " · ".join(f"{k} {'↑ ขึ้น' if v.get('dir') == 1 else '↓ ลง'}" for k, v in h.items())
+    st.caption(f"ราคา {w.get('price')} · เทรนด์ SMA20/200: {trend} · อัปเดต {ago(age)}" + (" ⚠ ข้อมูลเก่า" if age > 180 else ""))
+
+    def cell(s: dict) -> str:
+        if not s:
+            return "-"
+        if s.get("ready"):
+            return "🟢 พร้อมเข้า — " + s.get("text", "")
+        return ("⏳ " if s.get("trend_ok") else "⛔ เทรนด์ไม่ผ่าน · ") + s.get("text", "")
+    rows = []
+    for b in w.get("bots", []):
+        sd = b.get("sides") or {}
+        rows.append({"บอท": PROFILE_NAMES.get(b["bot"], b["bot"]), "TF": b.get("tf"), "ต้องการเทรนด์": "+".join(b.get("need") or []) or "ไม่กรอง",
+                     "SELL": cell(sd.get("SELL")), "BUY": cell(sd.get("BUY"))})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={"SELL": st.column_config.TextColumn(width="large"), "BUY": st.column_config.TextColumn(width="large")})
+    st.caption("🟢 เทรนด์ผ่านและราคาถึงจุดเข้าแล้ว (จะเปิดในแท่งที่ปิดถัดไป ถ้าไม่ติดเพดาน/ช่วงเวลา) · ⏳ เทรนด์ผ่านแต่ราคายังไม่ถึงจุดเข้า · ⛔ เทรนด์ไม่ผ่าน บอทจะไม่เข้าฝั่งนั้นต่อให้ราคาถึง")
+
+
 def team_status_section(now: datetime) -> None:
     docs = {d.get("profile"): d for d in db.status.find({"profile": {"$in": TEST_PROFILES}}, {"indicators": 0, "upcoming_news": 0, "recent_news": 0, "params_info": 0, "expected": 0})
             if "metaquotes" in str(d.get("server", "")).lower()}
@@ -1356,6 +1410,8 @@ def team_status_section(now: datetime) -> None:
     open_n = sum(len(d.get("positions") or []) for d in docs.values())
     c[2].metric("ไม้ที่เปิดอยู่", f"{open_n}")
     c[3].metric("ราคา Bid", f"{any_doc.get('bid', 0):,.2f}")
+    today_strip()
+    watch_section()
     rows, opens = [], []
     for prof in TEST_PROFILES:
         d = docs.get(prof)
@@ -1398,9 +1454,10 @@ def trades_reason_section() -> None:
         return
     df = df.copy()
     df["ผลการออก"] = [exit_kind(r, p) for r, p in zip(df["exit_reason"], df["กำไร $"])]
-    s = df.groupby("โปรไฟล์").agg(ไม้=("กำไร $", "size"), ชนะ=("win", "sum"), กำไร_รวม=("กำไร $", "sum"), avgR=("R", "mean"))
+    # ใช้ชื่อคอลัมน์อังกฤษตอนคำนวณ แล้วเปลี่ยนเป็นไทย — ชื่อ kwarg ภาษาไทยถูก Python แปลงรูปสระ (ำ→ํา) จนไม่ตรงกับสตริง
+    s = df.groupby("โปรไฟล์").agg(n=("กำไร $", "size"), wins=("win", "sum"), profit=("กำไร $", "sum"), avgR=("R", "mean"))
     kinds = df.pivot_table(index="โปรไฟล์", columns="ผลการออก", values="กำไร $", aggfunc="size", fill_value=0)
-    s = s.join(kinds).reset_index().rename(columns={"โปรไฟล์": "บอท", "กำไร_รวม": "กำไร $"})
+    s = s.join(kinds).reset_index().rename(columns={"โปรไฟล์": "บอท", "n": "ไม้", "wins": "ชนะ", "profit": "กำไร $"})
     s["กำไร $"] = s["กำไร $"].round(2); s["avgR"] = s["avgR"].round(3)
     st.markdown("**สรุปต่อบอท: เอากำไรกี่ครั้ง ตัดขาดทุนกี่ครั้ง**")
     st.dataframe(s, hide_index=True, width="stretch")
