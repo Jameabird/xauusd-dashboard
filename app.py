@@ -145,7 +145,7 @@ try:
     def _pname(prof: str) -> str:
         acct, base = (("Exness จริง · ", prof[7:]) if prof.startswith("exreal-") else ("Exness · ", prof[3:]) if prof.startswith("ex-") else ("", prof))
         return acct + PROFILE_NAMES.get(base, base)
-    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)", "m15b": "m15b · breakout M15 (ทดสอบ)", "m15sq": "m15sq · squeeze M15", "m15roc": "m15roc · momentum M15", "m30sq": "m30sq · squeeze M30", "m30mom": "m30mom · momentum M30"}
+    PROFILE_NAMES = {"main": "บอทหลัก", "re3": "re3 · re-entry", "hf": "hf · ความถี่สูง (ทดลอง)", "bo": "bo · breakout H4", "msc": "msc · ฝึก scalp MA5/13", "rsc": "rsc · ฝึก scalp MA3/21+re", "bsc": "bsc · ฝึก scalp breakout", "m30b": "m30b · breakout M30 (ทดสอบ)", "m15b": "m15b · breakout M15 (ทดสอบ)", "m15sq": "m15sq · squeeze M15", "m15roc": "m15roc · momentum M15", "m30sq": "m30sq · squeeze M30", "m30mom": "m30mom · momentum M30", "m1run": "m1run · แท่งสีเดียวกัน M1 (สำรวจ)", "m5run": "m5run · แท่งสีเดียวกัน M5 (สำรวจ)", "m10run": "m10run · แท่งสีเดียวกัน M10 (สำรวจ)", "m15run": "m15run · แท่งสีเดียวกัน M15 (สำรวจ)", "h1roc": "h1roc · โมเมนตัม H1 (สำรวจ)", "h4bo": "h4bo · breakout H4 (สำรวจ)"}
     bot_labels = {d["_id"]: f"{_pname(d.get('profile', 'main'))} · "
                             f"{(d.get('config') or {}).get('timeframe', '')} ({d['_id'].split('-')[-1]})" for d in _st}
 except OperationFailure as e:
@@ -995,7 +995,7 @@ def real_summary_card(now: datetime) -> None:
 
 # ---------- เกณฑ์ผ่านก่อนกลับไปเงินจริง (ตั้ง 2026-10-08) ----------
 TEST_START_TH = pd.Timestamp("2026-10-08 22:05")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
-TEST_PROFILES = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
+TEST_PROFILES = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom", "m1run", "m5run", "m10run", "m15run", "h1roc", "h4bo"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
 PASS_MIN_TRADES, PASS_GOOD_TRADES = 30, 50
 PASS_MIN_T = 1.5  # research/results/team_consensus.md: แค่ avgR > 0 บอทที่ไม่มี edge ก็ผ่านได้ ~50% → ต้อง t ≥ 1.5 ด้วย
 PASS_MAX_TOP2_SHARE = 0.5  # กำไรจาก 2 ไม้ดีสุดต้องไม่เกินครึ่งของกำไรรวม (ไม่พึ่งไม้ใหญ่ 1-2 ไม้)
@@ -1354,7 +1354,7 @@ def team_status_section(now: datetime) -> None:
     c[0].metric("Balance เดโม", f"{any_doc.get('balance', 0):,.2f}")
     c[1].metric("Equity", f"{any_doc.get('equity', 0):,.2f}", f"{any_doc.get('equity', 0) - any_doc.get('balance', 0):+,.2f} ลอย")
     open_n = sum(len(d.get("positions") or []) for d in docs.values())
-    c[2].metric("ไม้ที่เปิดอยู่", f"{open_n} / 3")
+    c[2].metric("ไม้ที่เปิดอยู่", f"{open_n}")
     c[3].metric("ราคา Bid", f"{any_doc.get('bid', 0):,.2f}")
     rows, opens = [], []
     for prof in TEST_PROFILES:
@@ -1415,8 +1415,8 @@ def trades_reason_section() -> None:
 def live() -> None:
     now = datetime.now(timezone.utc)
     st.title("ทีมบอท XAUUSD (เดโม)")
-    st.caption("ดูข้อมูลอย่างเดียว · กลุ่ม M15: m15b m15sq m15roc · กลุ่ม M30: m30b m30sq m30mom · SL $10 · "
-               "เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00 · เพดาน 2 ไม้/กลุ่ม 3 ไม้รวม")
+    st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
+               "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00")
     t_status, t_trades, t_pass, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "เกณฑ์ผ่าน", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
