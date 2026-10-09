@@ -1438,7 +1438,7 @@ def team_status_section(now: datetime) -> None:
     if opens:
         st.dataframe(pd.DataFrame(opens), hide_index=True, width="stretch")
     else:
-        st.caption("ไม่มีไม้ที่เปิดอยู่ — บอทรอสัญญาณตอนแท่งปิด (เข้าไม้ใหม่เฉพาะ 05:00-13:00 และ 19:00-01:00)")
+        st.caption("ไม่มีไม้ที่เปิดอยู่ — บอทรอสัญญาณตอนแท่งปิด (เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00)")
 
 
 def trades_reason_section() -> None:
@@ -1698,7 +1698,7 @@ def live() -> None:
     now = datetime.now(timezone.utc)
     st.title("ทีมบอท XAUUSD (เดโม)")
     st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
-               "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00")
+               "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00")
     t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน 236 ตัว", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
