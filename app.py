@@ -910,7 +910,7 @@ def news_blocking_table() -> None:
         st.caption("ยังไม่มีรายงานประจำวัน (งานรายวัน 06:00 ยังไม่รัน)")
         return
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    st.caption(f"อัปเดต {d.get('generated', '-')} (เวลาเครื่อง) · บอทบล็อกก่อน/หลังข่าว 30 นาทีเฉพาะ m15b/m30b และเฉพาะข่าวความสำคัญ ≥3 · บอท M5 ไม่กรองข่าว")
+    st.caption(f"อัปเดต {d.get('generated', '-')} (เวลาเครื่อง) · บอทบล็อกก่อน/หลังข่าว 30 นาทีเฉพาะ m15b/m30b และเฉพาะข่าวความสำคัญ ≥3 · บอทตัวอื่นไม่กรองข่าว")
 
 
 def daily_report_box() -> None:
@@ -936,7 +936,7 @@ def volume_filter_box() -> None:
 
 
 def normalized_section(df: pd.DataFrame, df_real: pd.DataFrame | None = None) -> None:
-    """เทียบบอทบนฐานเดียวกัน: กำไรต่อไม้ปรับเป็น 0.01 lot (เดโม MQ ใช้ 0.2 lot ตัวเลขดอลลาร์จึงเทียบกับบัญชีจริงตรงๆ ไม่ได้)"""
+    """เทียบบอทบนฐานเดียวกัน: กำไรต่อไม้ปรับเป็น 0.01 lot (เดโม MQ ใช้ lot 0.05-0.50 ตามบอท ตัวเลขดอลลาร์จึงเทียบกับบัญชีจริงตรงๆ ไม่ได้)"""
     frames = [x for x in (df, df_real) if x is not None and len(x)]
     if not frames:
         st.info("ยังไม่มีไม้ที่ปิดแล้ว")
@@ -1337,7 +1337,7 @@ def exit_kind(reason: str, profit: float) -> str:
     if "หมดเวลา" in r:
         return "⏱ หมดเวลาถือ"
     if "deal reason 3" in r or "close all" in r:
-        return "🌙 ปิดก่อนปิดคอม 01:00"
+        return "🌙 ปิดตอนเลิกเทรด 00:00 (คอมไม่ปิด)"
     if "มือ" in r or "dashboard" in r:
         return "✋ ปิดมือ"
     return r or "-"
@@ -1470,7 +1470,7 @@ def trades_reason_section() -> None:
 
 
 
-# ---------- ลีกบอทเสมือน 48 ตัว (league.py: ไม่ส่งออเดอร์ ซื้อขายเสมือนด้วยราคา bid/ask สด) ----------
+# ---------- ลีก 48 ตัว (league.py: จำลองด้วยราคา bid/ask สด + ส่งออเดอร์จริงบนเดโมสูงสุด 24 ไม้พร้อมกัน) ----------
 def league_tab() -> None:
     st.subheader("ลีกบอท 48 ตัว: แข่งกันทำกำไร (ส่งออเดอร์จริงบนเดโม)")
     st.caption("48 ตัวในโปรเซสเดียว ส่งออเดอร์จริงบนบัญชีเดโม (magic 20262001–20262048, lot 0.10, SL ที่เซิร์ฟเวอร์, เปิดพร้อมกันไม่เกิน 24 ไม้ — ตัวที่เกินเพดานเล่นแบบเสมือน) ผลสดใช้กำไรจริงจากโบรก · 12 ฐาน = ตัวแปรของบอทจริง (ต่างเล็กน้อย/ต่างมาก) × ซื้อ/ขายแยก × เข้าทันที(I)/รอแท่งยืนยัน(C) · "
@@ -1502,7 +1502,7 @@ def league_tab() -> None:
         s = df.sort_values(["สด กำไร $", "สด ไม้"], ascending=[False, False])
         st.dataframe(s[["ตัว", "TF", "ฝั่ง", "เข้า", "สด ไม้", "สด ชนะ %", "สด กำไร $", "สด $/oz", "สด DD $", "ถือไม้", "ลอย $", "HOLD $/oz"]], hide_index=True, width="stretch")
         if int(df["สด ไม้"].sum()) == 0:
-            st.caption("ยังไม่มีไม้สดที่ปิด — ลีกเปิดไม้ใหม่เฉพาะ 05:00–13:00 และ 19:00–01:00 เวลาไทย และปิดทุกไม้ 01:00")
+            st.caption("ยังไม่มีไม้สดที่ปิด — ลีกเปิดไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00 เวลาไทย · ปิดทุกไม้ตอน 00:00 (งานปิดประจำคืน) ")
     with t2:
         s = df.sort_values("HOLD $/oz", ascending=False)
         st.dataframe(s[["ตัว", "ฐาน", "ฝั่ง", "เข้า", "ย้อนหลัง HOLD ไม้", "HOLD $/oz", "HOLD t", "DEV $/oz", "โชค %ile (DEV)"]], hide_index=True, width="stretch")
