@@ -994,7 +994,7 @@ def real_summary_card(now: datetime) -> None:
 
 
 # ---------- เกณฑ์ผ่านก่อนกลับไปเงินจริง (ตั้ง 2026-10-08) ----------
-TEST_START_TH = pd.Timestamp("2026-10-08 22:05")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
+TEST_START_TH = pd.Timestamp("2026-10-09 23:55")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
 TEST_PROFILES = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom", "m1run", "m5run", "m10run", "m15run", "h1roc", "h4bo"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
 PASS_MIN_TRADES, PASS_GOOD_TRADES = 30, 50
 PASS_MIN_T = 1.5  # research/results/team_consensus.md: แค่ avgR > 0 บอทที่ไม่มี edge ก็ผ่านได้ ~50% → ต้อง t ≥ 1.5 ด้วย
