@@ -1359,16 +1359,17 @@ def today_strip() -> None:
         team, nt, expl, ne = float(a["กำไร $"].sum()), len(a), float(b["กำไร $"].sum()), len(b)
     lg = n_lg = 0.0
     try:
-        for x in db.league_trades.find({}, {"_id": 0, "close_time": 1, "pnl_usd": 1, "real_pnl": 1, "real": 1}).sort("close_time", DESCENDING).limit(400):
+        for x in db.league_trades.find({"real": True}, {"_id": 0, "close_time": 1, "real_pnl_usd": 1}).sort("close_time", DESCENDING).limit(400):
             ct = pd.to_datetime(x.get("close_time"), errors="coerce", utc=True)
-            if pd.notna(ct) and ct.tz_convert("Asia/Bangkok").date() == today:
-                lg += float(x.get("real_pnl") if x.get("real") and x.get("real_pnl") is not None else x.get("pnl_usd") or 0.0); n_lg += 1
+            if pd.notna(ct) and ct.tz_convert("Asia/Bangkok").date() == today and x.get("real_pnl_usd") not in (None, ""):
+                lg += float(x["real_pnl_usd"])
+                n_lg += 1
     except Exception:
         pass
     c = st.columns(3)
     c[0].metric("ทีมนับเกณฑ์ 6 ตัว วันนี้", f"{team:+,.2f} $", f"ปิดแล้ว {nt} ไม้", delta_color="off", delta_arrow="off")
     c[1].metric("บอทสำรวจ 6 ตัว วันนี้", f"{expl:+,.2f} $", f"ปิดแล้ว {ne} ไม้", delta_color="off", delta_arrow="off")
-    c[2].metric("ลีก 48 ตัว วันนี้ (จริง)", f"{lg:+,.2f} $", f"ปิดแล้ว {int(n_lg)} ไม้", delta_color="off", delta_arrow="off")
+    c[2].metric("ลีก 48 ตัว วันนี้ (เฉพาะไม้จริง)", f"{lg:+,.2f} $", f"ปิดแล้ว {int(n_lg)} ไม้", delta_color="off", delta_arrow="off")
 
 
 def watch_section() -> None:
@@ -1496,7 +1497,7 @@ def league_tab() -> None:
     c[1].metric("ไม้สดที่ปิดแล้วรวม", f"{int(df['สด ไม้'].sum())}")
     c[2].metric("กำไรสดรวม (0.10 lot เสมือน)", f"{live_total:+,.2f} $")
     c[3].metric("ตัวที่ถือไม้อยู่", f"{int((df['ถือไม้'] == '✅').sum())}")
-    t1, t2, t3 = st.tabs(["อันดับสด", "อันดับย้อนหลัง", "ไม้สดล่าสุด"])
+    t1, t2, t3, t4 = st.tabs(["อันดับสด", "อันดับย้อนหลัง", "ไม้สดล่าสุด", "จริงเทียบโมเดล"])
     with t1:
         s = df.sort_values(["สด กำไร $", "สด ไม้"], ascending=[False, False])
         st.dataframe(s[["ตัว", "TF", "ฝั่ง", "เข้า", "สด ไม้", "สด ชนะ %", "สด กำไร $", "สด $/oz", "สด DD $", "ถือไม้", "ลอย $", "HOLD $/oz"]], hide_index=True, width="stretch")
@@ -1513,6 +1514,102 @@ def league_tab() -> None:
         else:
             cols = [x for x in ("close_time", "variant", "side", "entry", "exit", "pnl_usd", "pnl_per_oz", "hold_min", "exit_reason", "signal_reason") if x in tr.columns]
             st.dataframe(tr[cols], hide_index=True, width="stretch")
+    with t4:
+        league_real_vs_model()
+
+
+# ---------- กราฟกำไรสะสม + ผลจริงเทียบโมเดลของลีก ----------
+def _profit_rows(include_virtual: bool) -> pd.DataFrame:
+    """ไม้ที่ปิดแล้วทุกกลุ่ม → (เวลาปิดไทย, กลุ่ม, บอท, กำไร $): ทีมนับเกณฑ์ 6 · บอทสำรวจ 6 · ลีก (เฉพาะไม้จริง หรือรวมเสมือนถ้าเลือก)"""
+    rows = []
+    df = trade_frame()
+    if not df.empty:
+        d = df[(df["โบรกเกอร์"] == "MetaQuotes") & df["โปรไฟล์"].isin(TEST_PROFILES)]
+        for _, r in d.iterrows():
+            rows.append((r["ปิดเมื่อ"], "ทีมนับเกณฑ์ 6" if r["โปรไฟล์"] in TEAM6 else "บอทสำรวจ 6", r["โปรไฟล์"], float(r["กำไร $"])))
+    for x in db.league_trades.find({}, {"_id": 0, "variant": 1, "close_time": 1, "pnl_usd": 1, "real": 1, "real_pnl_usd": 1}):
+        ct = pd.to_datetime(x.get("close_time"), errors="coerce", utc=True)
+        if pd.isna(ct):
+            continue
+        real = bool(x.get("real")) and x.get("real_pnl_usd") not in (None, "")
+        if not real and not include_virtual:
+            continue
+        rows.append((ct.tz_convert("Asia/Bangkok").tz_localize(None), "ลีก (จริง)" if real else "ลีก (เสมือน)", x.get("variant"),
+                     float(x["real_pnl_usd"]) if real else float(x.get("pnl_usd") or 0.0)))
+    cols = ["เวลา", "กลุ่ม", "บอท", "กำไร"]
+    return pd.DataFrame(rows, columns=cols).sort_values("เวลา").reset_index(drop=True) if rows else pd.DataFrame(columns=cols)
+
+
+def profit_tab() -> None:
+    st.subheader("กำไรสะสม")
+    inc = st.toggle("รวมไม้เสมือนของลีกด้วย (ไม้ที่เกินเพดาน 24 ไม้ หรือส่งออเดอร์ไม่สำเร็จ)", value=False, key="pf_inc_virtual")
+    d = _profit_rows(inc)
+    if d.empty:
+        st.info("ยังไม่มีไม้ที่ปิด — กราฟจะขึ้นเมื่อมีไม้แรก (ทีมนับเกณฑ์ / บอทสำรวจ / ลีกจริง)")
+        return
+    d["สะสม"] = d.groupby("กลุ่ม")["กำไร"].cumsum()
+    tot = d.copy()
+    tot["กลุ่ม"] = "รวมทั้งหมด"
+    tot["สะสม"] = tot["กำไร"].cumsum()
+    both = pd.concat([d, tot], ignore_index=True)
+    c = st.columns(4)
+    c[0].metric("กำไรสะสมรวม", f"{d['กำไร'].sum():+,.2f} $")
+    c[1].metric("ไม้ที่ปิดแล้ว", f"{len(d)}")
+    c[2].metric("ชนะ", f"{(d['กำไร'] > 0).mean() * 100:.0f}%")
+    dd = (tot["สะสม"].cummax() - tot["สะสม"]).max()
+    c[3].metric("drawdown สูงสุด", f"{dd:,.2f} $")
+    st.altair_chart(alt.Chart(both).mark_line(interpolate="step-after").encode(
+        x=alt.X("เวลา:T", title=None), y=alt.Y("สะสม:Q", title="กำไรสะสม (USD)"), color=alt.Color("กลุ่ม:N", title=None),
+        tooltip=["เวลา:T", "กลุ่ม:N", "บอท:N", alt.Tooltip("กำไร:Q", format="+,.2f"), alt.Tooltip("สะสม:Q", format="+,.2f")]).properties(height=320), width="stretch")
+    d["วัน"] = pd.to_datetime(d["เวลา"]).dt.date
+    daily = d.groupby(["วัน", "กลุ่ม"], as_index=False)["กำไร"].sum()
+    st.markdown("**กำไรรายวัน (เวลาไทย)**")
+    st.altair_chart(alt.Chart(daily).mark_bar().encode(x=alt.X("วัน:T", title=None), y=alt.Y("กำไร:Q", title="USD"), color=alt.Color("กลุ่ม:N", title=None),
+                                                       tooltip=["วัน:T", "กลุ่ม:N", alt.Tooltip("กำไร:Q", format="+,.2f")]).properties(height=220), width="stretch")
+    per = d.groupby(["กลุ่ม", "บอท"]).agg(n=("กำไร", "size"), wins=("กำไร", lambda x: int((x > 0).sum())), profit=("กำไร", "sum")).reset_index()
+    per["ชนะ %"] = (per["wins"] / per["n"] * 100).round(0)
+    per = per.rename(columns={"n": "ไม้", "profit": "กำไร $"}).drop(columns="wins").sort_values("กำไร $", ascending=False)
+    per["กำไร $"] = per["กำไร $"].round(2)
+    st.markdown("**แยกตามบอท**")
+    st.dataframe(per, hide_index=True, width="stretch")
+
+
+def league_real_vs_model() -> None:
+    st.markdown("**ผลจริงเทียบโมเดล (ไม้ลีกที่ส่งออเดอร์จริง)**")
+    docs = list(db.league_trades.find({}, {"_id": 0}))
+    if not docs:
+        st.info("ยังไม่มีไม้ลีกที่ปิด")
+        return
+    d = pd.DataFrame(docs)
+    if "real" not in d:
+        d["real"] = False
+    d["real"] = d["real"].fillna(False).astype(bool)
+    n_all, n_real = len(d), int(d["real"].sum())
+    st.caption(f"ไม้ลีกที่ปิดแล้วทั้งหมด {n_all} · ส่งออเดอร์จริง {n_real} · เสมือนอย่างเดียว {n_all - n_real} (เกินเพดาน / ช่วงเวลาห้ามเข้า / สเปรดกว้าง / ออเดอร์ไม่สำเร็จ)")
+    r = d[d["real"]].copy()
+    if r.empty:
+        st.info("ยังไม่มีไม้จริงที่ปิด — ตารางนี้จะเทียบกำไรที่โบรกจ่ายจริงกับที่โมเดลคำนวณ เพื่อดูต้นทุนที่โมเดลมองไม่เห็น (ราคาเลื่อน สเปรด swap)")
+        return
+    for col in ("pnl_usd", "real_pnl_usd", "entry", "real_entry", "exit", "real_exit"):
+        r[col] = pd.to_numeric(r[col], errors="coerce")
+    sgn = r["side"].map({"BUY": 1, "SELL": -1})
+    r["ต่าง $"] = (r["real_pnl_usd"] - r["pnl_usd"]).round(2)
+    r["เข้าเลื่อน $/oz"] = ((r["real_entry"] - r["entry"]) * sgn * -1).round(3)   # + = เข้าได้ราคาดีกว่าโมเดล
+    r["ออกเลื่อน $/oz"] = ((r["real_exit"] - r["exit"]) * sgn).round(3)           # + = ออกได้ราคาดีกว่าโมเดล
+    c = st.columns(4)
+    c[0].metric("ผลโมเดลรวม", f"{r['pnl_usd'].sum():+,.2f} $")
+    c[1].metric("ผลจริงรวม", f"{r['real_pnl_usd'].sum():+,.2f} $")
+    c[2].metric("ส่วนต่างรวม (จริง − โมเดล)", f"{r['ต่าง $'].sum():+,.2f} $", f"เฉลี่ย {r['ต่าง $'].mean():+.2f} $/ไม้", delta_color="off", delta_arrow="off")
+    c[3].metric("เลื่อนเฉลี่ย เข้า / ออก", f"{r['เข้าเลื่อน $/oz'].mean():+.2f} / {r['ออกเลื่อน $/oz'].mean():+.2f} $/oz")
+    g = r.groupby("variant").agg(n=("pnl_usd", "size"), model=("pnl_usd", "sum"), real=("real_pnl_usd", "sum")).reset_index()
+    g["ต่าง $"] = g["real"] - g["model"]
+    g = g.rename(columns={"variant": "ตัว", "n": "ไม้จริง", "model": "โมเดล $", "real": "จริง $"}).round(2).sort_values("จริง $", ascending=False)
+    st.dataframe(g, hide_index=True, width="stretch")
+    st.markdown("**ไม้จริงล่าสุด**")
+    show = r.sort_values("close_time", ascending=False).head(100)[["close_time", "variant", "side", "entry", "real_entry", "exit", "real_exit", "pnl_usd", "real_pnl_usd", "ต่าง $", "exit_reason"]]
+    st.dataframe(show, hide_index=True, width="stretch")
+    st.caption("ส่วนต่างติดลบสม่ำเสมอ = โมเดลประเมินต้นทุนต่ำไป (ราคาเลื่อน สเปรดจริงช่วงนั้น swap) · อันดับลีกใช้ผลจริงของไม้จริงเป็นหลัก")
+
 
 @st.fragment(run_every="15s")
 def live() -> None:
@@ -1520,11 +1617,13 @@ def live() -> None:
     st.title("ทีมบอท XAUUSD (เดโม)")
     st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
                "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00")
-    t_status, t_trades, t_pass, t_league, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ข่าว & ตลาด"])
+    t_status, t_trades, t_profit, t_pass, t_league, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
     with t_trades:
         trades_reason_section()
+    with t_profit:
+        profit_tab()
     with t_pass:
         pass_criteria_tab()
     with t_league:
