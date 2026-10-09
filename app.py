@@ -1411,19 +1411,67 @@ def trades_reason_section() -> None:
                  column_config={"ปิดเมื่อ": st.column_config.DatetimeColumn(format="DD/MM HH:mm"), "เหตุผลที่เข้า": st.column_config.TextColumn(width="large")})
 
 
+
+# ---------- ลีกบอทเสมือน 48 ตัว (league.py: ไม่ส่งออเดอร์ ซื้อขายเสมือนด้วยราคา bid/ask สด) ----------
+def league_tab() -> None:
+    st.subheader("ลีกบอท 48 ตัว: แข่งกันทำกำไร")
+    st.caption("บอทเสมือนในโปรเซสเดียว ใช้ราคาสดจากเทอร์มินัลเดโม (สเปรดจริง) ไม่ส่งออเดอร์ · 12 ฐาน = ตัวแปรของบอทจริง (ต่างเล็กน้อย/ต่างมาก) × ซื้อ/ขายแยก × เข้าทันที(I)/รอแท่งยืนยัน(C) · "
+               "ผลย้อนหลังคือ HOLDOUT ตั้งแต่ 1 ต.ค. 2025 ต้นทุน $0.45/oz · แข่ง 48 ตัวแล้วเลือกผู้ชนะ มีโชคปน ดูผลสดไปข้างหน้าเป็นหลัก")
+    docs = list(db.league_stats.find({}))
+    if not docs:
+        st.info("ยังไม่มีข้อมูลลีก — เริ่ม scripts\run_league.bat")
+        return
+    rows = []
+    for d in docs:
+        lv, bt = d.get("live") or {}, (d.get("backtest") or {})
+        hd, dv = bt.get("hold") or {}, bt.get("dev") or {}
+        rows.append({"ตัว": d["_id"], "ฐาน": d.get("strat"), "TF": d.get("tf"), "ฝั่ง": {"B": "BUY", "S": "SELL"}.get(d.get("side"), d.get("side")),
+                     "เข้า": {"I": "ทันที", "C": "รอยืนยัน"}.get(d.get("mode"), d.get("mode")),
+                     "สด ไม้": lv.get("n", 0), "สด ชนะ %": round(100 * lv.get("wins", 0) / lv["n"]) if lv.get("n") else None,
+                     "สด กำไร $": round(lv.get("net_usd", 0.0), 2), "สด $/oz": round(lv.get("per_oz", 0.0), 2),
+                     "สด DD $": round(lv.get("max_dd_usd", 0.0), 2), "ถือไม้": "✅" if lv.get("open") else "", "ลอย $": round(lv.get("open_pnl_usd", 0.0), 2),
+                     "ย้อนหลัง HOLD ไม้": hd.get("n"), "HOLD $/oz": hd.get("per_oz"), "HOLD t": hd.get("t"),
+                     "DEV $/oz": dv.get("per_oz"), "โชค %ile (DEV)": bt.get("luck_pct")})
+    df = pd.DataFrame(rows)
+    live_total = df["สด กำไร $"].sum()
+    c = st.columns(4)
+    c[0].metric("ตัวที่แข่ง", f"{len(df)}")
+    c[1].metric("ไม้สดที่ปิดแล้วรวม", f"{int(df['สด ไม้'].sum())}")
+    c[2].metric("กำไรสดรวม (0.10 lot เสมือน)", f"{live_total:+,.2f} $")
+    c[3].metric("ตัวที่ถือไม้อยู่", f"{int((df['ถือไม้'] == '✅').sum())}")
+    t1, t2, t3 = st.tabs(["อันดับสด", "อันดับย้อนหลัง", "ไม้สดล่าสุด"])
+    with t1:
+        s = df.sort_values(["สด กำไร $", "สด ไม้"], ascending=[False, False])
+        st.dataframe(s[["ตัว", "TF", "ฝั่ง", "เข้า", "สด ไม้", "สด ชนะ %", "สด กำไร $", "สด $/oz", "สด DD $", "ถือไม้", "ลอย $", "HOLD $/oz"]], hide_index=True, width="stretch")
+        if int(df["สด ไม้"].sum()) == 0:
+            st.caption("ยังไม่มีไม้สดที่ปิด — ลีกเปิดไม้ใหม่เฉพาะ 05:00–13:00 และ 19:00–01:00 เวลาไทย และปิดทุกไม้ 01:00")
+    with t2:
+        s = df.sort_values("HOLD $/oz", ascending=False)
+        st.dataframe(s[["ตัว", "ฐาน", "ฝั่ง", "เข้า", "ย้อนหลัง HOLD ไม้", "HOLD $/oz", "HOLD t", "DEV $/oz", "โชค %ile (DEV)"]], hide_index=True, width="stretch")
+        st.caption("เกณฑ์ผ่านแบบ Bonferroni (48 ตัว) ต้อง t ≥ 3.08 · ทองขึ้นแรงช่วง HOLDOUT ทำให้เกือบทุกตัวบวก ไม่ใช่ความแข็งของสัญญาณ · 'โชค %ile' สูง = ผลดีกว่าการสุ่มเข้า")
+    with t3:
+        tr = pd.DataFrame(list(db.league_trades.find({}, {"_id": 0}).sort("close_time", DESCENDING).limit(200)))
+        if tr.empty:
+            st.info("ยังไม่มีไม้สดที่ปิด")
+        else:
+            cols = [x for x in ("close_time", "variant", "side", "entry", "exit", "pnl_usd", "pnl_per_oz", "hold_min", "exit_reason", "signal_reason") if x in tr.columns]
+            st.dataframe(tr[cols], hide_index=True, width="stretch")
+
 @st.fragment(run_every="15s")
 def live() -> None:
     now = datetime.now(timezone.utc)
     st.title("ทีมบอท XAUUSD (เดโม)")
     st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
                "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00")
-    t_status, t_trades, t_pass, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "เกณฑ์ผ่าน", "ข่าว & ตลาด"])
+    t_status, t_trades, t_pass, t_league, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
     with t_trades:
         trades_reason_section()
     with t_pass:
         pass_criteria_tab()
+    with t_league:
+        league_tab()
     with t_news:
         s = db.status.find_one({"_id": bot_id})
         if s:
