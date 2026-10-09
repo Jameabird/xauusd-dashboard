@@ -1611,29 +1611,42 @@ def league_real_vs_model() -> None:
     st.caption("ส่วนต่างติดลบสม่ำเสมอ = โมเดลประเมินต้นทุนต่ำไป (ราคาเลื่อน สเปรดจริงช่วงนั้น swap) · อันดับลีกใช้ผลจริงของไม้จริงเป็นหลัก")
 
 
-def exit_methods_section(dx: pd.DataFrame) -> None:
-    """ชุดทดสอบวิธีออกไม้ (x<กรอบ><วิธี><ค่า>): เข้าไม้เหมือนกัน (3 แท่งสีเดียวกัน) ต่างกันที่ TP / เลื่อน SL คุ้มทุน / trailing / ระยะ SL"""
-    st.markdown("---")
-    st.markdown("**ชุดทดสอบวิธีออกไม้ (32 ตัว)** — เข้าไม้เหมือนกันหมด (3 แท่งสีเดียวกัน) ต่างที่วิธีออก: "
-                "`tp` TP ตายตัว $ · `lk` ถึง +$ แล้วเลื่อน SL มาคุ้มทุน · `tr` trailing ตาม ATR · `sl` SL แคบ/กว้าง (TP 12) · `lt` lock +4 + TP 12 · ถือสูงสุด 60 แท่ง")
-    if dx.empty:
-        st.info("ชุดวิธีออกไม้ยังไม่มีไม้ที่ปิด")
-        return
-    g = dx.groupby(["โปรไฟล์", "tf", "method", "param"], dropna=False)
-    t = g.agg(n=("R", "size"), wins=("win", "sum"), profit=("กำไร $", "sum"), avgR=("R", "mean")).reset_index()
-    t["ชนะ %"] = (t["wins"] / t["n"] * 100).round(0)
-    t = t.rename(columns={"โปรไฟล์": "บอท", "tf": "กรอบ", "method": "วิธี", "param": "ค่า", "n": "ไม้", "profit": "กำไร $"})
-    st.dataframe(t.sort_values("avgR", ascending=False)[["บอท", "กรอบ", "วิธี", "ค่า", "ไม้", "ชนะ %", "กำไร $", "avgR"]].round(2), hide_index=True, use_container_width=True)
-
-
+def exit_methods_section(dx: pd.DataFrame) -> None:
+    """ชุดทดสอบวิธีออกไม้ (x<กรอบ><วิธี><ค่า>): เข้าไม้เหมือนกัน (3 แท่งสีเดียวกัน) ต่างกันที่ TP / เลื่อน SL คุ้มทุน / trailing / ระยะ SL"""
+    st.markdown("---")
+    st.markdown("**ชุดทดสอบวิธีออกไม้ (x 48 + เมทริกซ์ TP×SL t 40 ตัว)** — เข้าไม้เหมือนกันหมด (3 แท่งสีเดียวกัน) ต่างที่วิธีออก: "
+                "`tp` TP ตายตัว $ · `lk` ถึง +$ แล้วเลื่อน SL มาคุ้มทุน · `tr` trailing ตาม ATR · `sl` SL แคบ/กว้าง (TP 12) · `lt` lock +4 + TP 12 · ถือสูงสุด 60 แท่ง")
+    if dx.empty:
+        st.info("ชุดวิธีออกไม้ยังไม่มีไม้ที่ปิด")
+        return
+    g = dx.groupby(["โปรไฟล์", "tf", "method", "param"], dropna=False)
+    t = g.agg(n=("R", "size"), wins=("win", "sum"), profit=("กำไร $", "sum"), avgR=("R", "mean")).reset_index()
+    t["ชนะ %"] = (t["wins"] / t["n"] * 100).round(0)
+    t = t.rename(columns={"โปรไฟล์": "บอท", "tf": "กรอบ", "method": "วิธี", "param": "ค่า", "n": "ไม้", "profit": "กำไร $"})
+    st.dataframe(t.sort_values("avgR", ascending=False)[["บอท", "กรอบ", "วิธี", "ค่า", "ไม้", "ชนะ %", "กำไร $", "avgR"]].round(2), hide_index=True, use_container_width=True)
+
+
+def fade_section(d: pd.DataFrame) -> None:
+    """ชุดสวนทิศ (f<กรอบ>n<แท่ง>h<ถือ>): เห็น N แท่งสีเดียวกันแล้วเข้าสวน — เทียบกับชุดตามทิศ (v)"""
+    st.markdown("---")
+    st.markdown("**ชุดสวนทิศ (fade, 48 ตัว)** — เห็น N แท่งสีเดียวกันแล้วเข้าฝั่งตรงข้าม (ชื่อ f<กรอบ>n<แท่ง>h<ถือ>)")
+    if d.empty:
+        st.info("ชุดสวนทิศยังไม่มีไม้ที่ปิด")
+        return
+    t = d.groupby(["โปรไฟล์", "tf"]).agg(n=("R", "size"), wins=("win", "sum"), profit=("กำไร $", "sum"), avgR=("R", "mean")).reset_index()
+    t["ชนะ %"] = (t["wins"] / t["n"] * 100).round(0)
+    t = t.rename(columns={"โปรไฟล์": "บอท", "tf": "กรอบ", "n": "ไม้", "profit": "กำไร $"})
+    st.dataframe(t.sort_values("avgR", ascending=False)[["บอท", "กรอบ", "ไม้", "ชนะ %", "กำไร $", "avgR"]].round(2), hide_index=True, use_container_width=True)
+
+
 def variants_tab() -> None:
-    """บอท run 100 ตัว (tools/gen_variants.py): เทียบกรอบเวลา × จำนวนแท่งสีเดียวกัน × ถือกี่แท่ง — บอทสำรวจ ไม่นับในเกณฑ์ผ่าน"""
-    st.caption("บอทสำรวจ 100 ตัว (ชื่อ v<กรอบ>n<แท่งสีเดียวกัน>h<ถือกี่แท่ง> เช่น v1n3h5 = M1, 3 แท่ง, ถือ ≤ 5 แท่ง) · lot 0.02 · ทดสอบเพื่อหาว่าถือสั้น/นานแบบไหนดี · "
-               "ระวัง: ลอง 100 แบบ ตัวที่ดูดีสุดมักเป็นโชค — ดูตัวที่มีไม้ ≥ 30 และดูทั้งแถบ (กลุ่ม) ไม่ใช่ตัวเดียว")
-    # บอท 100 ตัวไม่ต่อ Mongo เอง (BOT_MONGO=0) — tools/variants_sync.py ส่งไม้ที่ปิดแล้วขึ้น collection variant_trades
+    """ฝูงบอทเสมือน (swarm.py ในโปรเซสลีก): เทียบกรอบเวลา × จำนวนแท่งสีเดียวกัน × ถือกี่แท่ง — บอทสำรวจ ไม่นับในเกณฑ์ผ่าน"""
+    st.caption("ฝูงบอทเสมือน 236 ตัว จำลอง (paper) ไม่ส่งออเดอร์ (ชื่อ v<กรอบ>n<แท่งสีเดียวกัน>h<ถือกี่แท่ง> เช่น v1n3h5 = M1, 3 แท่ง, ถือ ≤ 5 แท่ง) · lot 0.02 · ทดสอบเพื่อหาว่าถือสั้น/นานแบบไหนดี · "
+               "ระวัง: ลอง 236 แบบ ตัวที่ดูดีสุดมักเป็นโชค — ดูตัวที่มีไม้ ≥ 30 และดูทั้งแถบ (กลุ่ม) ไม่ใช่ตัวเดียว")
+    # swarm.py ส่งไม้เสมือนที่ปิดแล้วขึ้น collection variant_trades
     docs = list(db.variant_trades.find({}, {"_id": 0, "profile": 1, "tf": 1, "run_n": 1, "hold": 1, "net_profit": 1, "r_multiple": 1, "family": 1, "method": 1, "param": 1}))
     if not docs:
-        st.info("บอท 100 ตัวยังไม่มีไม้ที่ปิด — รอสัญญาณ (ถือสั้น M1 จะมีไม้เร็วสุด) หรือ tools/variants_sync.py ยังไม่ได้ส่ง")
+        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (ถือสั้น M1 จะมีไม้เร็วสุด)")
         return
     df = pd.DataFrame(docs).rename(columns={"profile": "โปรไฟล์", "run_n": "run_n", "hold": "hold"})
     df["กำไร $"] = pd.to_numeric(df["net_profit"], errors="coerce")
@@ -1641,10 +1654,12 @@ def variants_tab() -> None:
     df = df.dropna(subset=["กำไร $"])
     df["win"] = df["กำไร $"] > 0
     fam = df["family"].fillna("v") if "family" in df else pd.Series("v", index=df.index)
-    dx, df = df[fam == "x"].copy(), df[fam != "x"].copy()
+    dx, dfade = df[fam.isin(["x", "t"])].copy(), df[fam == "f"].copy()
+    df = df[~fam.isin(["x", "t", "f"])].copy()
     if df.empty:
-        st.info("บอทชุด v ยังไม่มีไม้ที่ปิด")
+        st.info("ชุดตามทิศ (v) ยังไม่มีไม้ที่ปิด")
         exit_methods_section(dx)
+        fade_section(dfade)
         return
     keys = ["โปรไฟล์", "tf", "run_n", "hold"]
     g = df.groupby(keys)
@@ -1675,6 +1690,7 @@ def variants_tab() -> None:
     if len(pr):
         st.dataframe(pr.pivot(index="run_n", columns="tf", values="avgR").round(2), use_container_width=True)
     exit_methods_section(dx)
+    fade_section(dfade)
 
 
 @st.fragment(run_every="15s")
@@ -1683,7 +1699,7 @@ def live() -> None:
     st.title("ทีมบอท XAUUSD (เดโม)")
     st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
                "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ 05:00-13:00 และ 19:00-01:00")
-    t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "บอท 100 ตัว", "ข่าว & ตลาด"])
+    t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน 236 ตัว", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
     with t_trades:
