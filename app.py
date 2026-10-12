@@ -710,75 +710,144 @@ FAMILY_NAMES = {"v": "ตามทิศ N แท่งสีเดียวก�
                 "b": "Fibonacci retracement", "k": "Keltner breakout", "c": "MACD ตัด", "e": "Stochastic กลับตัว", "p": "ทะลุ high/low D1 เมื่อวาน",
                 "u": "เลขกลม", "w": "รูปแท่งเทียน", "z": "ความผันผวนพุ่ง",
                 "bb": "Bollinger ทะลุแถบ", "cci": "CCI ทะลุระดับ", "st": "Supertrend พลิก", "ha": "Heikin-Ashi เปลี่ยนสี", "sar": "Parabolic SAR พลิก",
-                "ich": "Ichimoku", "piv": "Pivot D1", "vol": "ปริมาณติ๊กพุ่ง", "hl": "ทะลุแล้วปิดกลับ", "lr": "ช่องถดถอยเชิงเส้น"}
+                "ich": "Ichimoku", "piv": "Pivot D1", "vol": "ปริมาณติ๊กพุ่ง", "hl": "ทะลุแล้วปิดกลับ", "lr": "ช่องถดถอยเชิงเส้น",
+                "lg": "สไตล์ลีก (เทรนด์หลายกรอบ · ปิด 18:00 UTC)"}
 TF_ORDER = ["M1", "M5", "M10", "M15", "M30", "H1", "H4"]
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_swarm_stats() -> list[dict]:
-    return list(db.swarm_stats.find({}, {"updated": 0, "last": 0, "sig": 0, "mult": 0, "run_n": 0}))   # หลักหมื่น-แสนเอกสาร: ดึงเฉพาะฟิลด์ที่ใช้
+    """top ~40,000 บอทตาม avgR (n>=10) — swarm.py เขียนลง swarm_stats"""
+    return list(db.swarm_stats.find({}, {"updated": 0}))
 
 
-def variants_tab() -> None:
-    """ฝูงบอทเสมือน (swarm.py ในโปรเซสลีก): สถิติรวมต่อตัวจาก Mongo collection swarm_stats (swarm.py ส่งทุก 5 นาที) — ไม้ดิบอยู่ใน logs/swarm/trades.csv"""
-    st.caption("ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) ~100,000 ตัว: 29 ชุดแนวคิด × 7 กรอบเวลา (M1-H4) × โปรไฟล์ออกไม้ 10 แบบ (ต่อท้ายชื่อ _s05 _t2 _r1 ... = SL/TP/trailing ต่างกัน สัญญาณเข้าเหมือนกัน จึงไม่ใช่ตัวอิสระ) · ชื่อบอท = ชุด + กรอบ + พารามิเตอร์ (h = ถือกี่แท่ง, _d1/_h4/_adx = ตัวกรอง) · "
-               "ระวัง: ลองหลายพันแบบ ตัวที่ดูดีสุดมักเป็นโชค — เชื่อเมื่อไม้ ≥ 30, avgR > 0 และ t เกินเส้น 'โชคล้วน' ที่แสดงด้านล่าง · อัปเดตทุก ~5 นาที")
-    docs = load_swarm_stats()
-    if not docs:
-        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (ถือสั้น M1 จะมีไม้เร็วสุด)")
-        return
+@st.cache_data(ttl=120, show_spinner=False)
+def load_swarm_agg() -> list[dict]:
+    """สรุปรายมิติของบอททั้งหมด (family|dim|val) — swarm.py เขียนลง swarm_agg"""
+    return list(db.swarm_agg.find({}, {"updated": 0}))
+
+
+def swarm_board_df(docs: list[dict]) -> pd.DataFrame:
+    """swarm_stats -> ตารางบอท + avgR, t, ชนะ %, ชุด (pure pandas)"""
     d = pd.DataFrame(docs).rename(columns={"_id": "name"})
     for c in ("n", "wins", "net", "sumR", "sumR2"):
-        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
+        d[c] = pd.to_numeric(d[c] if c in d else 0, errors="coerce")
+        d[c] = d[c].fillna(0)
     d["avgR"] = d["sumR"] / d["n"].where(d["n"] > 0)
     var = ((d["sumR2"] - d["n"] * d["avgR"] ** 2) / (d["n"] - 1)).clip(lower=0)
     d["t"] = np.where((d["n"] > 2) & (var > 0), d["avgR"] / np.sqrt(var / d["n"]), np.nan)
-    d["ชนะ %"] = (d["wins"] / d["n"] * 100).round(0)
+    d["ชนะ %"] = (d["wins"] / d["n"].where(d["n"] > 0) * 100).round(0)
     d["ชุด"] = d["family"].map(lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("ไม้ที่ปิดแล้วทั้งหมด", f"{int(d['n'].sum()):,}")
-    c2.metric("กำไรเสมือนรวม", f"{d['net'].sum():+,.0f} $")
-    c3.metric("บอทที่มีไม้แล้ว", f"{int((d['n'] > 0).sum()):,}")
-    fam_opts = [f for f in FAMILY_NAMES if f in set(d["family"])]
-    sel_f = st.multiselect("ชุดสัญญาณ", fam_opts, default=fam_opts, format_func=lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}", key="sw_fam")
-    sel_t = st.multiselect("กรอบเวลา", [t for t in TF_ORDER if t in set(d["tf"])], default=[t for t in TF_ORDER if t in set(d["tf"])], key="sw_tf")
-    min_n = st.slider("แสดงเฉพาะบอทที่มีไม้อย่างน้อย", 1, 100, 10, key="sw_min_n")
-    f = d[d["family"].isin(sel_f) & d["tf"].isin(sel_t)]
-    t_ = f[f["n"] >= min_n]
-    n_tested = max(len(t_), 2)
-    st.caption(f"เส้น 'โชคล้วน': ลอง {n_tested:,} ตัว ตัวที่ดีที่สุดโดยบังเอิญจะได้ t ≈ {np.sqrt(2 * np.log(n_tested)):.1f} — ตัวที่ t ต่ำกว่านี้ยังแยกจากโชคไม่ได้ (ประมาณคร่าวๆ)")
-    st.markdown("**อันดับบอท (เรียงตาม avgR) — 60 อันดับแรก**")
-    out = t_.sort_values("avgR", ascending=False).head(60).rename(columns={"name": "บอท", "tf": "กรอบ", "n": "ไม้", "net": "กำไร $"})
-    st.dataframe(out[["บอท", "ชุด", "กรอบ", "ไม้", "ชนะ %", "กำไร $", "avgR", "t"]].round(2), hide_index=True, use_container_width=True)
-    st.markdown("**เฉลี่ยตามชุด × กรอบเวลา — avgR (ถ่วงน้ำหนักด้วยจำนวนไม้) และจำนวนไม้**")
-    g = f.groupby(["ชุด", "tf"]).agg(sumR=("sumR", "sum"), n=("n", "sum")).reset_index()
+    return d
+
+
+def swarm_agg_df(docs: list[dict]) -> pd.DataFrame:
+    a = pd.DataFrame(docs)
+    if a.empty:
+        return a
+    for c in ("n", "wins", "net", "sumR", "sumR2", "bots"):
+        a[c] = pd.to_numeric(a[c] if c in a else 0, errors="coerce")
+        a[c] = a[c].fillna(0)
+    a["val"] = a["val"].astype(str)
+    a["avgR"] = a["sumR"] / a["n"].where(a["n"] > 0)
+    return a
+
+
+def swarm_marginal(a: pd.DataFrame, dim: str, family: str | None = None, prefix: str | None = None) -> pd.DataFrame:
+    """ตารางเฉพาะมิติ dim (รวมทุกชุดถ้า family=None; ถ่วงน้ำหนักด้วยไม้) : ค่า, ไม้, กำไร $, avgR, บอท"""
+    m = a[a["dim"] == dim]
+    if family is not None:
+        m = m[m["family"] == family]
+    if prefix:
+        m = m[m["val"].str.startswith(prefix)]
+    if m.empty:
+        return pd.DataFrame(columns=["ค่า", "ไม้", "กำไร $", "avgR", "บอท"])
+    g = m.groupby("val").agg(n=("n", "sum"), net=("net", "sum"), sumR=("sumR", "sum"), bots=("bots", "sum")).reset_index()
     g["avgR"] = g["sumR"] / g["n"].where(g["n"] > 0)
-    if len(g):
-        pv = g.pivot(index="ชุด", columns="tf", values="avgR").reindex(columns=[t for t in TF_ORDER if t in set(g["tf"])]).round(3)
-        pn = g.pivot(index="ชุด", columns="tf", values="n").reindex(columns=pv.columns).fillna(0).astype(int)
-        a, b = st.columns(2)
-        a.caption("avgR")
-        a.dataframe(pv, use_container_width=True)
-        b.caption("จำนวนไม้")
-        b.dataframe(pn, use_container_width=True)
-    v = f[f["family"] == "v"]
-    if len(v):
-        st.markdown("**ชุด v: ถือกี่แท่งดีที่สุด? (avgR ถ่วงน้ำหนัก แยกตามกรอบ)**")
-        gh = v.groupby(["hold", "tf"]).agg(sumR=("sumR", "sum"), n=("n", "sum")).reset_index()
-        gh["avgR"] = gh["sumR"] / gh["n"].where(gh["n"] > 0)
-        st.dataframe(gh.pivot(index="hold", columns="tf", values="avgR").reindex(columns=[t for t in TF_ORDER if t in set(gh["tf"])]).round(3), use_container_width=True)
-    ov = f[f["method"] == "ov"] if "method" in f else f.iloc[0:0]
+    if prefix:
+        g["val"] = g["val"].str[len(prefix):]
+    return g.rename(columns={"val": "ค่า", "n": "ไม้", "net": "กำไร $", "bots": "บอท"})[["ค่า", "ไม้", "กำไร $", "avgR", "บอท"]].sort_values("avgR", ascending=False).round(3)
+
+
+def swarm_tf_pivot(a: pd.DataFrame, families: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """ชุด × กรอบ: (avgR, จำนวนไม้) จาก dim=='tf'"""
+    t = a[(a["dim"] == "tf") & a["family"].isin(families)].copy()
+    if t.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    t["ชุด"] = t["family"].map(lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}")
+    g = t.groupby(["ชุด", "val"]).agg(sumR=("sumR", "sum"), n=("n", "sum")).reset_index()
+    g["avgR"] = g["sumR"] / g["n"].where(g["n"] > 0)
+    cols = [x for x in TF_ORDER if x in set(g["val"])] + sorted(set(g["val"]) - set(TF_ORDER))
+    pv = g.pivot(index="ชุด", columns="val", values="avgR").reindex(columns=cols).round(3)
+    pn = g.pivot(index="ชุด", columns="val", values="n").reindex(columns=cols).fillna(0).astype(int)
+    return pv, pn
+
+
+def luck_line(n_bots: int) -> float:
+    return float(np.sqrt(2 * np.log(max(n_bots, 2))))
+
+
+def variants_tab() -> None:
+    """ฝูงบอทเสมือน (swarm.py): ตารางอันดับจาก swarm_stats (top 40k) + สรุปรายมิติจาก swarm_agg (ทุกตัว) — ไม้ดิบอยู่ใน logs/swarm/trades.csv"""
+    docs, adocs = load_swarm_stats(), load_swarm_agg()
+    if not docs and not adocs:
+        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~5 นาที)")
+        return
+    a = swarm_agg_df(adocs)
+    tf_all = a[a["dim"] == "tf"] if len(a) else a
+    n_bots = int(tf_all["bots"].sum()) if len(tf_all) else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("ไม้ที่ปิดแล้วทั้งหมด", f"{int(tf_all['n'].sum()):,}" if len(tf_all) else "–")
+    c2.metric("กำไรเสมือนรวม", f"{tf_all['net'].sum():+,.0f} $" if len(tf_all) else "–")
+    c3.metric("บอทที่มีไม้แล้ว", f"{n_bots:,}" if len(tf_all) else "–")
+    line = luck_line(n_bots)
+    st.caption(f"ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) ~1,000,000 ตัว · อันดับด้านล่างแสดงเฉพาะบอทที่มีไม้ ≥ ค่าที่เลือก จาก 40,000 ตัวบนสุด (ตาม avgR) ที่เก็บไว้ — ตัวอื่นเห็นได้เฉพาะในตารางสรุปรายมิติ · "
+               f"ระวัง: ลอง {max(n_bots, 2):,} ตัว ตัวดีสุดมักเป็นโชค — เส้น 'โชคล้วน' t ≈ √(2 ln N) = {line:.1f} ตัวที่ t ต่ำกว่านี้แยกจากโชคไม่ได้ (ประมาณคร่าวๆ) · "
+               "โปรไฟล์ออกไม้ (_s1t2 _r2 ...) ใช้สัญญาณเข้าเหมือนต้นแบบ จึงไม่ใช่ตัวอิสระ · อัปเดตทุก ~5 นาที")
+    st.markdown("**อันดับบอท (เรียงตาม avgR) — 60 อันดับแรก**")
+    if docs:
+        d = swarm_board_df(docs)
+        fam_opts = [f for f in FAMILY_NAMES if f in set(d["family"])] + sorted(set(d["family"]) - set(FAMILY_NAMES))
+        tf_opts = [t for t in TF_ORDER if t in set(d["tf"])]
+        sel_f = st.multiselect("ชุดสัญญาณ", fam_opts, default=fam_opts, format_func=lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}", key="sw_fam")
+        sel_t = st.multiselect("กรอบเวลา", tf_opts, default=tf_opts, key="sw_tf")
+        min_n = st.slider("แสดงเฉพาะบอทที่มีไม้อย่างน้อย", 10, 200, 30, key="sw_min_n")
+        t_ = d[d["family"].isin(sel_f) & d["tf"].isin(sel_t) & (d["n"] >= min_n)]
+        out = t_.sort_values("avgR", ascending=False).head(60).rename(columns={"name": "บอท", "tf": "กรอบ", "n": "ไม้", "net": "กำไร $"})
+        st.dataframe(out[["บอท", "ชุด", "กรอบ", "ไม้", "ชนะ %", "กำไร $", "avgR", "t"]].round(2), hide_index=True, use_container_width=True)
+    else:
+        st.info("ยังไม่มีบอทที่มีไม้ ≥ 10 ใน swarm_stats")
+    if a.empty:
+        st.info("ยังไม่มีสรุปรายมิติ (swarm_agg)")
+        return
+    st.markdown("**ชุด × กรอบเวลา — avgR (ถ่วงน้ำหนักด้วยไม้) และจำนวนไม้ · นับทุกบอท**")
+    fams = [f for f in FAMILY_NAMES if f in set(tf_all["family"])] + sorted(set(tf_all["family"]) - set(FAMILY_NAMES))
+    pv, pn = swarm_tf_pivot(a, fams)
+    if len(pv):
+        x, y = st.columns(2)
+        x.caption("avgR")
+        x.dataframe(pv, use_container_width=True)
+        y.caption("จำนวนไม้")
+        y.dataframe(pn, use_container_width=True)
+    st.markdown("**ตารางสรุปรายมิติ (avgR = ถ่วงน้ำหนักด้วยไม้ · 'บอท' = จำนวนตัวที่มีไม้)**")
+    mf = st.selectbox("ชุดสำหรับตาราง 'ถือกี่แท่ง' และ 'ตัวกรอง'", fams, format_func=lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}", key="sw_mfam") if fams else None
+    if mf:
+        h1, h2 = st.columns(2)
+        h1.caption(f"ถือกี่แท่ง (fc = ปิด 18:00 UTC) — ชุด {mf}")
+        h1.dataframe(swarm_marginal(a, "hold", mf), hide_index=True, use_container_width=True)
+        h2.caption(f"ตัวกรองเทรนด์ (- = ไม่กรอง) — ชุด {mf}")
+        h2.dataframe(swarm_marginal(a, "flt", mf), hide_index=True, use_container_width=True)
+    ov = swarm_marginal(a, "mp", None, "ov:")
     if len(ov):
-        st.markdown("**โปรไฟล์ออกไม้ (ทับทุกชุด) — avgR ถ่วงน้ำหนัก** · s05/s2 = SL ครึ่ง/สองเท่า · t1 t2 t3 = TP 1/2/3 เท่า SL · h1 = SL ครึ่ง+TP 1 · k5 = ล็อกคุ้มทุน+TP 2 · r1 r2 = trailing 1/2 ATR")
-        go = ov.groupby("param").agg(sumR=("sumR", "sum"), n=("n", "sum"), net=("net", "sum")).reset_index()
-        go["avgR"] = go["sumR"] / go["n"].where(go["n"] > 0)
-        st.dataframe(go.rename(columns={"param": "โปรไฟล์", "n": "ไม้", "net": "กำไร $"})[["โปรไฟล์", "ไม้", "กำไร $", "avgR"]].round(3), hide_index=True, use_container_width=True)
-    x = f[f["family"] == "x"]
-    if len(x):
-        st.markdown("**ชุด x: วิธีออกไม้ (ค่า = เท่าของ SL ฐานของกรอบ; tr = เท่าของ ATR) — avgR ถ่วงน้ำหนัก**")
-        gx = x.groupby(["method", "param"]).agg(sumR=("sumR", "sum"), n=("n", "sum"), net=("net", "sum")).reset_index()
-        gx["avgR"] = gx["sumR"] / gx["n"].where(gx["n"] > 0)
-        st.dataframe(gx.rename(columns={"method": "วิธี", "param": "ค่า", "n": "ไม้", "net": "กำไร $"})[["วิธี", "ค่า", "ไม้", "กำไร $", "avgR"]].round(3), hide_index=True, use_container_width=True)
+        st.caption("โปรไฟล์ออกไม้ (ทับทุกชุด) — s = SL, t = TP เท่าของ SL, r = trailing, l = ล็อกทุน")
+        st.dataframe(ov, hide_index=True, use_container_width=True)
+    if (a["family"] == "lg").any():
+        st.markdown(f"**ชุด lg · {FAMILY_NAMES['lg']} — ฝั่งไหน / ตัวกรองไหน / ออกแบบไหนได้ผล**")
+        for dim, title in (("side", "ฝั่ง (B = BUY, S = SELL, A = ทั้งคู่)"), ("sl", "SL ($)"), ("tp", "TP ($)"), ("hold", "ออกไม้ (fc = ปิด 18:00 UTC, ตัวเลข = ถือกี่แท่ง)"), ("flt", "ตัวกรองเทรนด์ (- = ไม่กรอง)"), ("sig", "สัญญาณ")):
+            t = swarm_marginal(a, dim, "lg")
+            if len(t):
+                st.caption(title)
+                st.dataframe(t, hide_index=True, use_container_width=True)
 
 
 @st.fragment(run_every="15s")
@@ -787,7 +856,7 @@ def live() -> None:
     st.title("ทีมบอท XAUUSD (เดโม)")
     st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
                "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00")
-    t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน (หลายพันตัว)", "ข่าว & ตลาด"])
+    t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน (ล้านตัว)", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
     with t_trades:
