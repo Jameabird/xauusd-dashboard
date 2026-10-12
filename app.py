@@ -77,7 +77,8 @@ db = get_db("MONGODB_URI")
 
 # บอทที่ปลดแล้ว (2026-10-06: ไม่เคยเข้าไม้จากสัญญาณ) — ซ่อนจากทุกหน้า ข้อมูลยังอยู่ใน DB (ประวัติไม้ที่ปิดแล้วยังนับในกำไรรวม)
 RETIRED_BOT_IDS = ["10012984221-20261003", "10012984221-20261004", "10012984221-20261006", "414406827-20261006",  # main, re3, bo, ex-bo
-                   "10012984221-20261005", "10012984221-20261007", "10012984221-20261008", "10012984221-20261009"]  # hf, msc, rsc, bsc (ปลด 2026-10-08)
+                   "10012984221-20261005", "10012984221-20261007", "10012984221-20261008", "10012984221-20261009",  # hf, msc, rsc, bsc (ปลด 2026-10-08)
+                   *[f"10012984221-202610{n}" for n in range(12, 22)]]  # m15sq m15roc m30sq m30mom m1run m5run m10run m15run h1roc h4bo (เลิก 2026-10-12 — ฝูงเสมือนครอบคลุมแทน; ข้อมูลเดิมยังอยู่ใน Mongo)
 
 
 class _VisibleStatus:
@@ -322,7 +323,7 @@ def daily_report_box() -> None:
 
 # ---------- เกณฑ์ผ่านก่อนกลับไปเงินจริง (ตั้ง 2026-10-08) ----------
 TEST_START_TH = pd.Timestamp("2026-10-09 23:55")  # เริ่มทดสอบแบบตรึงค่า (เวลาไทย) — ไม้ที่เปิดก่อนนี้ไม่นับ
-TEST_PROFILES = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom", "m1run", "m5run", "m10run", "m15run", "h1roc", "h4bo"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เพิ่มสมาชิกกลุ่มใหม่ที่นี่ แต่ละตัวนับเกณฑ์แยกของตัวเอง
+TEST_PROFILES = ["m15b", "m30b"]  # บอทที่อยู่ในการทดสอบ (MetaQuotes เดโม) — เหลือ 2 ตัวหลังเลิกบอทสำรวจ 10 ตัว 2026-10-12 แต่ละตัวนับเกณฑ์แยกของตัวเอง
 PASS_MIN_TRADES, PASS_GOOD_TRADES = 30, 50
 PASS_MIN_T = 1.5  # research/results/team_consensus.md: แค่ avgR > 0 บอทที่ไม่มี edge ก็ผ่านได้ ~50% → ต้อง t ≥ 1.5 ด้วย
 PASS_MAX_TOP2_SHARE = 0.5  # กำไรจาก 2 ไม้ดีสุดต้องไม่เกินครึ่งของกำไรรวม (ไม่พึ่งไม้ใหญ่ 1-2 ไม้)
@@ -438,19 +439,19 @@ def exit_kind(reason: str, profit: float) -> str:
 
 
 # ---------- สรุปวันนี้ + "รออะไรอยู่" (entry_watch.py ส่งขึ้น Mongo ทุกนาทีจาก league.py) ----------
-TEAM6 = ["m15b", "m15sq", "m15roc", "m30b", "m30sq", "m30mom"]
+TEAM6 = ["m15b", "m30b"]
 
 
 def today_strip() -> None:
     """กำไร/ขาดทุนที่ปิดแล้ววันนี้ (เวลาไทย) แยกกลุ่ม: ทีมนับเกณฑ์ 6 · บอทสำรวจ 6 · ลีกส่งออเดอร์จริง 48"""
     today = datetime.now(TH).date()
     df = trade_frame()
-    team = expl = 0.0
-    nt = ne = 0
+    team = 0.0
+    nt = 0
     if not df.empty:
         d0 = df[(df["โบรกเกอร์"] == "MetaQuotes") & (df["ปิดเมื่อ"].dt.date == today)]
-        a = d0[d0["โปรไฟล์"].isin(TEAM6)]; b = d0[d0["โปรไฟล์"].isin(TEST_PROFILES) & ~d0["โปรไฟล์"].isin(TEAM6)]
-        team, nt, expl, ne = float(a["กำไร $"].sum()), len(a), float(b["กำไร $"].sum()), len(b)
+        a = d0[d0["โปรไฟล์"].isin(TEAM6)]
+        team, nt = float(a["กำไร $"].sum()), len(a)
     lg = n_lg = 0.0
     try:
         for x in db.league_trades.find({"real": True}, {"_id": 0, "close_time": 1, "real_pnl_usd": 1}).sort("close_time", DESCENDING).limit(400):
@@ -460,10 +461,9 @@ def today_strip() -> None:
                 n_lg += 1
     except Exception:
         pass
-    c = st.columns(3)
-    c[0].metric("ทีมนับเกณฑ์ 6 ตัว วันนี้", f"{team:+,.2f} $", f"ปิดแล้ว {nt} ไม้", delta_color="off", delta_arrow="off")
-    c[1].metric("บอทสำรวจ 6 ตัว วันนี้", f"{expl:+,.2f} $", f"ปิดแล้ว {ne} ไม้", delta_color="off", delta_arrow="off")
-    c[2].metric("ลีก 48 ตัว วันนี้ (เฉพาะไม้จริง)", f"{lg:+,.2f} $", f"ปิดแล้ว {int(n_lg)} ไม้", delta_color="off", delta_arrow="off")
+    c = st.columns(2)
+    c[0].metric("บอททดสอบ 2 ตัว (m15b m30b) วันนี้", f"{team:+,.2f} $", f"ปิดแล้ว {nt} ไม้", delta_color="off", delta_arrow="off")
+    c[1].metric("ลีก 48 ตัว วันนี้ (เฉพาะไม้จริง)", f"{lg:+,.2f} $", f"ปิดแล้ว {int(n_lg)} ไม้", delta_color="off", delta_arrow="off")
 
 
 def watch_section() -> None:
@@ -620,7 +620,7 @@ def _profit_rows(include_virtual: bool) -> pd.DataFrame:
     if not df.empty:
         d = df[(df["โบรกเกอร์"] == "MetaQuotes") & df["โปรไฟล์"].isin(TEST_PROFILES)]
         for _, r in d.iterrows():
-            rows.append((r["ปิดเมื่อ"], "ทีมนับเกณฑ์ 6" if r["โปรไฟล์"] in TEAM6 else "บอทสำรวจ 6", r["โปรไฟล์"], float(r["กำไร $"])))
+            rows.append((r["ปิดเมื่อ"], "บอททดสอบ 2", r["โปรไฟล์"], float(r["กำไร $"])))
     for x in db.league_trades.find({}, {"_id": 0, "variant": 1, "close_time": 1, "pnl_usd": 1, "real": 1, "real_pnl_usd": 1}):
         ct = pd.to_datetime(x.get("close_time"), errors="coerce", utc=True)
         if pd.isna(ct):
@@ -715,13 +715,13 @@ FAMILY_NAMES = {"v": "ตามทิศ N แท่งสีเดียวก�
 TF_ORDER = ["M1", "M5", "M10", "M15", "M30", "H1", "H4"]
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def load_swarm_stats() -> list[dict]:
     """top ~40,000 บอทตาม avgR (n>=10) — swarm.py เขียนลง swarm_stats"""
     return list(db.swarm_stats.find({}, {"updated": 0}))
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def load_swarm_agg() -> list[dict]:
     """สรุปรายมิติของบอททั้งหมด (family|dim|val) — swarm.py เขียนลง swarm_agg"""
     return list(db.swarm_agg.find({}, {"updated": 0}))
@@ -744,7 +744,7 @@ def swarm_board_df(docs: list[dict]) -> pd.DataFrame:
 def swarm_agg_df(docs: list[dict]) -> pd.DataFrame:
     a = pd.DataFrame(docs)
     if a.empty:
-        return a
+        return pd.DataFrame(columns=["family", "dim", "val", "n", "wins", "net", "sumR", "sumR2", "bots", "avgR"])   # คอลัมน์ครบ กันตารางพังตอนอ่านจังหวะ collection ว่าง
     for c in ("n", "wins", "net", "sumR", "sumR2", "bots"):
         a[c] = pd.to_numeric(a[c] if c in a else 0, errors="coerce")
         a[c] = a[c].fillna(0)
@@ -787,11 +787,32 @@ def luck_line(n_bots: int) -> float:
     return float(np.sqrt(2 * np.log(max(n_bots, 2))))
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def load_swarm_live() -> dict:
+    """สถานะสดของฝูง (swarm.py ส่งทุก ~30 วินาที ลง swarm_live)"""
+    return db.swarm_live.find_one({"_id": "swarm"}) or {}
+
+
+def swarm_live_strip() -> None:
+    lv = load_swarm_live()
+    if not lv:
+        return
+    age = (datetime.now(timezone.utc) - lv["ts"]).total_seconds() if lv.get("ts") else None
+    ok = age is not None and age < 120
+    st.markdown(f"{'🟢' if ok else '🔴'} **ฝูงสด** · อัปเดต {age:,.0f} วินาทีที่แล้ว" + ("" if ok else " — ฝูงอาจหยุดอยู่ (เช็ก watchdog)") if age is not None else "ฝูง: ไม่มีเวลาอัปเดต")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ไม้เสมือนเปิดอยู่", f"{lv.get('open', 0):,}")
+    c2.metric("กำไรลอยรวม", f"{lv['floating']:+,.0f} $" if lv.get("floating") is not None else "–")
+    c3.metric("ไม้ปิด/นาที", f"{lv.get('closed_per_min', 0):,.0f}")
+    c4.metric("ตัวแปรทั้งหมด", f"{lv.get('variants', 0):,}")
+
+
 def variants_tab() -> None:
     """ฝูงบอทเสมือน (swarm.py): ตารางอันดับจาก swarm_stats (top 40k) + สรุปรายมิติจาก swarm_agg (ทุกตัว) — ไม้ดิบอยู่ใน logs/swarm/trades.csv"""
+    swarm_live_strip()
     docs, adocs = load_swarm_stats(), load_swarm_agg()
     if not docs and not adocs:
-        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~5 นาที)")
+        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~30 วินาที)")
         return
     a = swarm_agg_df(adocs)
     tf_all = a[a["dim"] == "tf"] if len(a) else a
@@ -803,7 +824,7 @@ def variants_tab() -> None:
     line = luck_line(n_bots)
     st.caption(f"ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) ~1,000,000 ตัว · อันดับด้านล่างแสดงเฉพาะบอทที่มีไม้ ≥ ค่าที่เลือก จาก 40,000 ตัวบนสุด (ตาม avgR) ที่เก็บไว้ — ตัวอื่นเห็นได้เฉพาะในตารางสรุปรายมิติ · "
                f"ระวัง: ลอง {max(n_bots, 2):,} ตัว ตัวดีสุดมักเป็นโชค — เส้น 'โชคล้วน' t ≈ √(2 ln N) = {line:.1f} ตัวที่ t ต่ำกว่านี้แยกจากโชคไม่ได้ (ประมาณคร่าวๆ) · "
-               "โปรไฟล์ออกไม้ (_s1t2 _r2 ...) ใช้สัญญาณเข้าเหมือนต้นแบบ จึงไม่ใช่ตัวอิสระ · อัปเดตทุก ~5 นาที")
+               "โปรไฟล์ออกไม้ (_s1t2 _r2 ...) ใช้สัญญาณเข้าเหมือนต้นแบบ จึงไม่ใช่ตัวอิสระ · อัปเดตทุก ~30 วินาที")
     st.markdown("**อันดับบอท (เรียงตาม avgR) — 60 อันดับแรก**")
     if docs:
         d = swarm_board_df(docs)
@@ -854,8 +875,8 @@ def variants_tab() -> None:
 def live() -> None:
     now = datetime.now(timezone.utc)
     st.title("ทีมบอท XAUUSD (เดโม)")
-    st.caption("ดูข้อมูลอย่างเดียว · ทีมทดสอบ (ตรึงค่า): กลุ่ม M15 m15b m15sq m15roc · กลุ่ม M30 m30b m30sq m30mom · "
-               "บอทสำรวจทุกกรอบเวลา: m1run m5run m10run m15run h1roc h4bo · เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00")
+    st.caption("ดูข้อมูลอย่างเดียว · บอททดสอบแบบตรึงค่า (เดโมจริง): m15b (M15) · m30b (M30) · ลีก 48 ตัว (ไม้จริงบนเดโม) · ฝูงเสมือน ~1,000,000 ตัว (paper) · "
+               "เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00")
     t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน (ล้านตัว)", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
