@@ -708,18 +708,20 @@ def league_real_vs_model() -> None:
 FAMILY_NAMES = {"v": "ตามทิศ N แท่งสีเดียวกัน", "f": "สวนทิศ (fade)", "x": "วิธีออกไม้", "d": "Donchian breakout", "r": "momentum ตัด ±z",
                 "s": "Bollinger squeeze", "m": "MA ตัดกัน", "i": "RSI กลับตัว", "a": "ทะลุช่วงเอเชีย", "o": "แรงช่วงเปิดตลาด", "g": "สัญญาณเดิม + กรองเทรนด์/ADX",
                 "b": "Fibonacci retracement", "k": "Keltner breakout", "c": "MACD ตัด", "e": "Stochastic กลับตัว", "p": "ทะลุ high/low D1 เมื่อวาน",
-                "u": "เลขกลม", "w": "รูปแท่งเทียน", "z": "ความผันผวนพุ่ง"}
+                "u": "เลขกลม", "w": "รูปแท่งเทียน", "z": "ความผันผวนพุ่ง",
+                "bb": "Bollinger ทะลุแถบ", "cci": "CCI ทะลุระดับ", "st": "Supertrend พลิก", "ha": "Heikin-Ashi เปลี่ยนสี", "sar": "Parabolic SAR พลิก",
+                "ich": "Ichimoku", "piv": "Pivot D1", "vol": "ปริมาณติ๊กพุ่ง", "hl": "ทะลุแล้วปิดกลับ", "lr": "ช่องถดถอยเชิงเส้น"}
 TF_ORDER = ["M1", "M5", "M10", "M15", "M30", "H1", "H4"]
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_swarm_stats() -> list[dict]:
-    return list(db.swarm_stats.find({}, {"updated": 0}))
+    return list(db.swarm_stats.find({}, {"updated": 0, "last": 0, "sig": 0, "mult": 0, "run_n": 0}))   # หลักหมื่น-แสนเอกสาร: ดึงเฉพาะฟิลด์ที่ใช้
 
 
 def variants_tab() -> None:
     """ฝูงบอทเสมือน (swarm.py ในโปรเซสลีก): สถิติรวมต่อตัวจาก Mongo collection swarm_stats (swarm.py ส่งทุก 5 นาที) — ไม้ดิบอยู่ใน logs/swarm/trades.csv"""
-    st.caption("ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) หลายพันตัว: 19 ชุดแนวคิด × 7 กรอบเวลา (M1-H4) ชุดเดียวกันทุกกรอบ · ชื่อบอท = ชุด + กรอบ + พารามิเตอร์ (h = ถือกี่แท่ง, _d1/_h4/_adx = ตัวกรอง) · "
+    st.caption("ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) ~100,000 ตัว: 29 ชุดแนวคิด × 7 กรอบเวลา (M1-H4) × โปรไฟล์ออกไม้ 10 แบบ (ต่อท้ายชื่อ _s05 _t2 _r1 ... = SL/TP/trailing ต่างกัน สัญญาณเข้าเหมือนกัน จึงไม่ใช่ตัวอิสระ) · ชื่อบอท = ชุด + กรอบ + พารามิเตอร์ (h = ถือกี่แท่ง, _d1/_h4/_adx = ตัวกรอง) · "
                "ระวัง: ลองหลายพันแบบ ตัวที่ดูดีสุดมักเป็นโชค — เชื่อเมื่อไม้ ≥ 30, avgR > 0 และ t เกินเส้น 'โชคล้วน' ที่แสดงด้านล่าง · อัปเดตทุก ~5 นาที")
     docs = load_swarm_stats()
     if not docs:
@@ -765,6 +767,12 @@ def variants_tab() -> None:
         gh = v.groupby(["hold", "tf"]).agg(sumR=("sumR", "sum"), n=("n", "sum")).reset_index()
         gh["avgR"] = gh["sumR"] / gh["n"].where(gh["n"] > 0)
         st.dataframe(gh.pivot(index="hold", columns="tf", values="avgR").reindex(columns=[t for t in TF_ORDER if t in set(gh["tf"])]).round(3), use_container_width=True)
+    ov = f[f["method"] == "ov"] if "method" in f else f.iloc[0:0]
+    if len(ov):
+        st.markdown("**โปรไฟล์ออกไม้ (ทับทุกชุด) — avgR ถ่วงน้ำหนัก** · s05/s2 = SL ครึ่ง/สองเท่า · t1 t2 t3 = TP 1/2/3 เท่า SL · h1 = SL ครึ่ง+TP 1 · k5 = ล็อกคุ้มทุน+TP 2 · r1 r2 = trailing 1/2 ATR")
+        go = ov.groupby("param").agg(sumR=("sumR", "sum"), n=("n", "sum"), net=("net", "sum")).reset_index()
+        go["avgR"] = go["sumR"] / go["n"].where(go["n"] > 0)
+        st.dataframe(go.rename(columns={"param": "โปรไฟล์", "n": "ไม้", "net": "กำไร $"})[["โปรไฟล์", "ไม้", "กำไร $", "avgR"]].round(3), hide_index=True, use_container_width=True)
     x = f[f["family"] == "x"]
     if len(x):
         st.markdown("**ชุด x: วิธีออกไม้ (ค่า = เท่าของ SL ฐานของกรอบ; tr = เท่าของ ATR) — avgR ถ่วงน้ำหนัก**")
