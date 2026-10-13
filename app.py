@@ -787,103 +787,259 @@ def luck_line(n_bots: int) -> float:
     return float(np.sqrt(2 * np.log(max(n_bots, 2))))
 
 
+MIN_GROUP_N = 100  # กลุ่มที่มีไม้น้อยกว่านี้ถือว่า "ข้อมูลยังน้อย" (avgR แกว่งง่าย)
+POS_COLOR, NEG_COLOR, DIM_COLOR = "#1a7f37", "#cf222e", "#8c959f"
+
+
+def _tone(v) -> str:
+    try:
+        if v is None or v != v:
+            return ""
+        return f"color: {POS_COLOR}; font-weight: 600" if v > 0 else f"color: {NEG_COLOR}; font-weight: 600" if v < 0 else ""
+    except Exception:
+        return ""
+
+
+def styled(df: pd.DataFrame, tone_cols: list[str] | None = None, fmt: dict | None = None, dim_mask=None):
+    """DataFrame -> Styler: ตัวเลขบวกเขียว/ลบแดง (เครื่องหมาย +/- ยังแสดงอยู่ ไม่พึ่งสีอย่างเดียว) และจางแถวที่ข้อมูลน้อย; ถ้า Styler ใช้ไม่ได้ คืน df เดิม"""
+    try:
+        sty = df.style
+        cols = [c for c in (tone_cols or []) if c in df.columns]
+        if cols:
+            sty = (sty.map if hasattr(sty, "map") else sty.applymap)(_tone, subset=cols)
+        if dim_mask is not None and len(df):
+            mask = [bool(x) for x in dim_mask]
+            pos = {idx: i for i, idx in enumerate(df.index)}
+            sty = sty.apply(lambda r: [f"color: {DIM_COLOR}" if mask[pos[r.name]] else "" for _ in r], axis=1)
+        return sty.format(fmt or {}, na_rep="–")
+    except Exception:
+        return df
+
+
+def usd(x, digits: int = 0) -> str:
+    return "–" if x is None or x != x else f"{x:+,.{digits}f} $"
+
+
+def swarm_group_df(a: pd.DataFrame) -> pd.DataFrame:
+    """ชุด×กรอบเวลา (family×tf) จากแถว dim=='tf' ของ swarm_agg: ไม้, กำไร $, avgR, บอท"""
+    cols = ["กลุ่ม", "family", "tf", "ไม้", "กำไร $", "avgR", "บอท", "ข้อมูล"]
+    t = a[a["dim"] == "tf"] if len(a) else a
+    if t.empty:
+        return pd.DataFrame(columns=cols)
+    g = t.groupby(["family", "val"]).agg(n=("n", "sum"), net=("net", "sum"), sumR=("sumR", "sum"), bots=("bots", "sum")).reset_index()
+    g["avgR"] = g["sumR"] / g["n"].where(g["n"] > 0)
+    g["กลุ่ม"] = g["family"] + " · " + g["family"].map(lambda f: FAMILY_NAMES.get(f, f)) + " · " + g["val"]
+    g["ข้อมูล"] = np.where(g["n"] >= MIN_GROUP_N, "พอ", "น้อย")
+    return g.rename(columns={"val": "tf", "n": "ไม้", "net": "กำไร $", "bots": "บอท"})[cols]
+
+
+def swarm_tf_summary(a: pd.DataFrame) -> pd.DataFrame:
+    cols = ["กรอบ", "ไม้", "กำไร $", "avgR", "บอท"]
+    t = a[a["dim"] == "tf"] if len(a) else a
+    if t.empty:
+        return pd.DataFrame(columns=cols)
+    g = t.groupby("val").agg(n=("n", "sum"), net=("net", "sum"), sumR=("sumR", "sum"), bots=("bots", "sum")).reset_index()
+    g["avgR"] = g["sumR"] / g["n"].where(g["n"] > 0)
+    order = {x: i for i, x in enumerate(TF_ORDER)}
+    g = g.sort_values("val", key=lambda s: s.map(lambda v: order.get(v, 99)))
+    return g.rename(columns={"val": "กรอบ", "n": "ไม้", "net": "กำไร $", "bots": "บอท"})[cols]
+
+
 @st.cache_data(ttl=10, show_spinner=False)
 def load_swarm_live() -> dict:
     """สถานะสดของฝูง (swarm.py ส่งทุก ~30 วินาที ลง swarm_live)"""
     return db.swarm_live.find_one({"_id": "swarm"}) or {}
 
 
+def _utc(dt):
+    return dt if getattr(dt, "tzinfo", None) else dt.replace(tzinfo=timezone.utc)
+
+
 def swarm_live_strip() -> None:
     lv = load_swarm_live()
     if not lv:
         return
-    age = (datetime.now(timezone.utc) - lv["ts"]).total_seconds() if lv.get("ts") else None
-    ok = age is not None and age < 120
-    st.markdown(f"{'🟢' if ok else '🔴'} **ฝูงสด** · อัปเดต {age:,.0f} วินาทีที่แล้ว" + ("" if ok else " — ฝูงอาจหยุดอยู่ (เช็ก watchdog)") if age is not None else "ฝูง: ไม่มีเวลาอัปเดต")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("ไม้เสมือนเปิดอยู่", f"{lv.get('open', 0):,}")
-    c2.metric("กำไรลอยรวม", f"{lv['floating']:+,.0f} $" if lv.get("floating") is not None else "–")
-    c3.metric("ไม้ปิด/นาที", f"{lv.get('closed_per_min', 0):,.0f}")
-    c4.metric("ตัวแปรทั้งหมด", f"{lv.get('variants', 0):,}")
-
-
-def variants_tab() -> None:
-    """ฝูงบอทเสมือน (swarm.py): ตารางอันดับจาก swarm_stats (top 40k) + สรุปรายมิติจาก swarm_agg (ทุกตัว) — ไม้ดิบอยู่ใน logs/swarm/trades.csv"""
-    swarm_live_strip()
-    lv = load_swarm_live() or {}
-    docs, adocs = load_swarm_stats(), load_swarm_agg()
-    if not docs and not adocs:
-        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~30 วินาที)")
-        return
-    a = swarm_agg_df(adocs)
-    tf_all = a[a["dim"] == "tf"] if len(a) else a
-    n_bots = int(tf_all["bots"].sum()) if len(tf_all) else 0
-    c1, c2, c3 = st.columns(3)
-    c1.metric("ไม้ที่ปิดแล้วทั้งหมด", f"{int(tf_all['n'].sum()):,}" if len(tf_all) else "–")
-    c2.metric("กำไรเสมือนรวม", f"{tf_all['net'].sum():+,.0f} $" if len(tf_all) else "–")
-    c3.metric("บอทที่มีไม้แล้ว", f"{n_bots:,}" if len(tf_all) else "–")
-    line = luck_line(n_bots)
-    pb = lv.get("prune") or {}
-    if pb.get("ts") and len(tf_all):
-        since_n, since_net = int(tf_all["n"].sum()) - int(pb.get("n", 0)), float(tf_all["net"].sum()) - float(pb.get("net", 0.0))
-        st.markdown(f"✂️ **ตัดฝูง {str(pb['ts'])[:16].replace('T', ' ')} UTC:** {int(pb.get('before', 0)):,} → {int(pb.get('after', 0)):,} ตัว · "
-                    f"ตั้งแต่ตัด ชุดที่เหลือปิดไป {since_n:,} ไม้ กำไรเสมือน {since_net:+,.0f} $" + (f" + กำไรลอยของไม้ที่ยังเปิด {lv['floating']:+,.0f} $ = **รวม {since_net + lv['floating']:+,.0f} $**" if lv.get("floating") is not None else "") + f" (ยอดตั้งต้น {int(pb.get('n', 0)):,} ไม้ {float(pb.get('net', 0.0)):+,.0f} $ รวมอยู่ในยอดรวมด้านบน) "
-                    f"· ตัวที่ถูกตัด: H1 H4, M1 (ยกเว้นชุด x), M5 (ยกเว้นชุด b c — ตัดรอบสอง) และ 22 คู่ ชุด×กรอบเวลาที่ขาดทุนทั้งสองวัน (swarm_prune.py)")
-    st.caption(f"ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) {lv.get('variants', 0):,} ตัว (ตัดตัวที่ขาดทุนต่อเนื่องออกแล้ว) · อันดับด้านล่างแสดงเฉพาะบอทที่มีไม้ ≥ ค่าที่เลือก จาก 40,000 ตัวบนสุด (ตาม avgR) ที่เก็บไว้ — ตัวอื่นเห็นได้เฉพาะในตารางสรุปรายมิติ · "
-               f"ระวัง: ลอง {max(n_bots, 2):,} ตัว ตัวดีสุดมักเป็นโชค — เส้น 'โชคล้วน' t ≈ √(2 ln N) = {line:.1f} ตัวที่ t ต่ำกว่านี้แยกจากโชคไม่ได้ (ประมาณคร่าวๆ) · "
-               "โปรไฟล์ออกไม้ (_s1t2 _r2 ...) ใช้สัญญาณเข้าเหมือนต้นแบบ จึงไม่ใช่ตัวอิสระ · อัปเดตทุก ~30 วินาที")
-    st.markdown("**อันดับบอท (เรียงตาม avgR) — 60 อันดับแรก**")
-    if docs:
-        d = swarm_board_df(docs)
-        fam_opts = [f for f in FAMILY_NAMES if f in set(d["family"])] + sorted(set(d["family"]) - set(FAMILY_NAMES))
-        tf_opts = [t for t in TF_ORDER if t in set(d["tf"])]
-        sel_f = st.multiselect("ชุดสัญญาณ", fam_opts, default=fam_opts, format_func=lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}", key="sw_fam")
-        sel_t = st.multiselect("กรอบเวลา", tf_opts, default=tf_opts, key="sw_tf")
-        min_n = st.slider("แสดงเฉพาะบอทที่มีไม้อย่างน้อย", 10, 200, 30, key="sw_min_n")
-        t_ = d[d["family"].isin(sel_f) & d["tf"].isin(sel_t) & (d["n"] >= min_n)]
-        out = t_.sort_values("avgR", ascending=False).head(60).rename(columns={"name": "บอท", "tf": "กรอบ", "n": "ไม้", "net": "กำไร $"})
-        st.dataframe(out[["บอท", "ชุด", "กรอบ", "ไม้", "ชนะ %", "กำไร $", "avgR", "t"]].round(2), hide_index=True, use_container_width=True)
+    ts = lv.get("ts")
+    age = (datetime.now(timezone.utc) - _utc(ts)).total_seconds() if ts else None
+    if age is None:
+        st.caption("ฝูง: ไม่มีเวลาอัปเดต")
+    elif age < 120:
+        st.caption(f"🟢 ฝูงสด · อัปเดต {age:,.0f} วินาทีที่แล้ว")
     else:
-        st.info("ยังไม่มีบอทที่มีไม้ ≥ 10 ใน swarm_stats")
-    if a.empty:
-        st.info("ยังไม่มีสรุปรายมิติ (swarm_agg)")
+        st.warning(f"🔴 ฝูงเงียบมา {ago(age)} — ฝูงอาจหยุดอยู่ (เช็ก watchdog) ตัวเลขด้านล่างอาจเก่า")
+
+
+def swarm_headline(lv: dict, tf_all: pd.DataFrame) -> None:
+    pb = lv.get("prune") or {}
+    fl = lv.get("floating")
+    has_tf = len(tf_all) > 0
+    tot_n = int(tf_all["n"].sum()) if has_tf else 0
+    tot_net = float(tf_all["net"].sum()) if has_tf else None
+    since_n = since_net = None
+    if pb.get("ts") and has_tf:
+        since_n, since_net = tot_n - int(pb.get("n", 0) or 0), tot_net - float(pb.get("net", 0.0) or 0.0)
+    with st.container(border=True):
+        if since_net is not None:
+            st.markdown(f"##### ✂️ ผลตั้งแต่ตัดฝูง ({str(pb['ts'])[:16].replace('T', ' ')} UTC)")
+            m = st.columns(3)
+            m[0].metric("กำไรที่ปิดแล้ว", usd(since_net), f"{since_n:,} ไม้", delta_color="off", delta_arrow="off")
+            m[1].metric("กำไรลอย (ยังไม่ปิด)", usd(fl), "ยังไม่รับรู้" if fl is not None else None, delta_color="off", delta_arrow="off")
+            m[2].metric("รวมปิด + ลอย", usd(since_net + fl) if fl is not None else usd(since_net), "ปิด + ลอย" if fl is not None else "ไม่มีค่ากำไรลอย",
+                        delta_color="off", delta_arrow="off")
+        else:
+            st.markdown("##### ภาพรวมฝูง (ยังไม่มีจุดตัดฝูงให้เทียบ — แสดงยอดสะสมทั้งหมด)")
+            m = st.columns(3)
+            m[0].metric("กำไรที่ปิดแล้ว (สะสม)", usd(tot_net), f"{tot_n:,} ไม้" if has_tf else None, delta_color="off", delta_arrow="off")
+            m[1].metric("กำไรลอย (ยังไม่ปิด)", usd(fl), delta_color="off", delta_arrow="off")
+            m[2].metric("รวมปิด + ลอย", usd(tot_net + fl) if (fl is not None and tot_net is not None) else "–")
+        n = st.columns(3)
+        n[0].metric("ตัวแปรที่ยังอยู่", f"{int(lv.get('variants', 0) or 0):,}")
+        n[1].metric("ไม้เสมือนเปิดอยู่", f"{int(lv.get('open', 0) or 0):,}")
+        n[2].metric("ไม้ปิด / นาที", f"{float(lv.get('closed_per_min', 0) or 0):,.0f}")
+        if pb.get("ts"):
+            st.caption(f"ตัดจาก {int(pb.get('before', 0) or 0):,} → {int(pb.get('after', 0) or 0):,} ตัว (swarm_prune.py) · "
+                       f"ยอดตั้งต้น ณ จุดตัด {int(pb.get('n', 0) or 0):,} ไม้ {float(pb.get('net', 0.0) or 0.0):+,.0f} $ รวมอยู่ในยอดสะสมแล้ว")
+    st.warning("⚠️ ตัวเลขทั้งหมดเป็นผลจำลอง (paper) · ตัวที่ถูกเลือกไว้เพราะ \"ดูดี\" ในอดีต (in-sample) มักแย่ลงเมื่อใช้จริงข้างหน้า — "
+               "ยิ่งลองหลายตัวยิ่งมีโชคปน · กำไรลอยยังไม่ปิด อาจกลับเป็นขาดทุนได้ · ใช้ดูทิศทางเท่านั้น ไม่ใช่คำสัญญาผลกำไร")
+
+
+def swarm_best_worst(a: pd.DataFrame) -> None:
+    g = swarm_group_df(a)
+    st.markdown("#### ใครเด่น / ใครแย่ตอนนี้ (ชุดสัญญาณ × กรอบเวลา)")
+    g = g.dropna(subset=["avgR"])
+    if g.empty:
+        st.caption("ยังไม่มีข้อมูลกลุ่ม")
         return
-    st.markdown("**ชุด × กรอบเวลา — avgR (ถ่วงน้ำหนักด้วยไม้) และจำนวนไม้ · นับทุกบอท**")
-    fams = [f for f in FAMILY_NAMES if f in set(tf_all["family"])] + sorted(set(tf_all["family"]) - set(FAMILY_NAMES))
-    pv, pn = swarm_tf_pivot(a, fams)
+    ok = g[g["ไม้"] >= MIN_GROUP_N]
+    few = len(g) - len(ok)
+    st.caption(f"เรียงตาม avgR (กำไรเฉลี่ยต่อไม้ในหน่วยความเสี่ยง R) · แสดงเฉพาะกลุ่มที่มีไม้ ≥ {MIN_GROUP_N} เพราะน้อยกว่านี้ avgR แกว่งตามโชคง่าย"
+               + (f" · ซ่อน {few} กลุ่มที่ข้อมูลยังน้อย (ดูในกล่อง \"ทุกกลุ่ม\")" if few else ""))
+    show = ok if len(ok) else g
+    if not len(ok):
+        st.info(f"ยังไม่มีกลุ่มไหนมีไม้ถึง {MIN_GROUP_N} — แสดงทุกกลุ่มที่มี (ตัวอักษรจาง = ข้อมูลน้อย)")
+    k = min(8, max(1, len(show) // 2))
+    best = show.sort_values("avgR", ascending=False).head(k)
+    worst = show.sort_values("avgR", ascending=True).head(k)
+    cols = ["กลุ่ม", "ไม้", "avgR", "กำไร $", "บอท"]
+    fmt = {"ไม้": "{:,.0f}", "avgR": "{:+.3f}", "กำไร $": "{:+,.0f}", "บอท": "{:,.0f}"}
+    x, y = st.columns(2)
+    x.markdown("**🏆 ดีที่สุด**")
+    x.dataframe(styled(best[cols], ["avgR", "กำไร $"], fmt, best["ข้อมูล"] == "น้อย"), hide_index=True, width="stretch")
+    y.markdown("**⚠️ แย่ที่สุด**")
+    y.dataframe(styled(worst[cols], ["avgR", "กำไร $"], fmt, worst["ข้อมูล"] == "น้อย"), hide_index=True, width="stretch")
+    with st.expander(f"ทุกกลุ่ม ({len(g)}) — ชุด × กรอบเวลา"):
+        allg = g.sort_values("avgR", ascending=False)
+        st.dataframe(styled(allg[cols + ["ข้อมูล"]], ["avgR", "กำไร $"], fmt, allg["ข้อมูล"] == "น้อย"), hide_index=True, width="stretch")
+
+
+def swarm_tf_section(a: pd.DataFrame) -> None:
+    s = swarm_tf_summary(a)
+    st.markdown("#### สรุปตามกรอบเวลา")
+    if s.empty:
+        st.caption("ยังไม่มีข้อมูล")
+        return
+    x, y = st.columns([3, 2])
+    s2 = s.assign(ผล=np.where(s["กำไร $"] >= 0, "กำไร", "ขาดทุน"))
+    x.altair_chart(alt.Chart(s2).mark_bar().encode(
+        x=alt.X("กรอบ:N", sort=list(s2["กรอบ"]), title=None), y=alt.Y("กำไร $:Q", title="กำไรเสมือน (USD)"),
+        color=alt.Color("ผล:N", scale=alt.Scale(domain=["กำไร", "ขาดทุน"], range=[POS_COLOR, NEG_COLOR]), legend=None),
+        tooltip=["กรอบ:N", alt.Tooltip("กำไร $:Q", format="+,.0f"), alt.Tooltip("ไม้:Q", format=","), alt.Tooltip("avgR:Q", format="+.3f")]).properties(height=220),
+        width="stretch")
+    y.dataframe(styled(s, ["กำไร $", "avgR"], {"ไม้": "{:,.0f}", "กำไร $": "{:+,.0f}", "avgR": "{:+.3f}", "บอท": "{:,.0f}"}, s["ไม้"] < MIN_GROUP_N),
+                hide_index=True, width="stretch")
+
+
+def swarm_ranking(docs: list[dict], n_bots: int) -> None:
+    line = luck_line(n_bots)
+    st.caption(f"แสดงเฉพาะบอทที่มีไม้ ≥ ค่าที่เลือก จาก 40,000 ตัวบนสุด (ตาม avgR) ที่เก็บไว้ — ตัวอื่นเห็นได้เฉพาะในตารางสรุป · "
+               f"ลอง {max(n_bots, 2):,} ตัว ตัวดีสุดมักเป็นโชค: เส้น 'โชคล้วน' t ≈ √(2 ln N) = {line:.1f} ตัวที่ t ต่ำกว่านี้แยกจากโชคไม่ได้ (ประมาณคร่าวๆ) · "
+               "โปรไฟล์ออกไม้ (_s1t2 _r2 ...) ใช้สัญญาณเข้าเหมือนต้นแบบ จึงไม่ใช่ตัวอิสระ")
+    if not docs:
+        st.info("ยังไม่มีบอทที่มีไม้ ≥ 10 ใน swarm_stats")
+        return
+    d = swarm_board_df(docs)
+    fam_opts = [f for f in FAMILY_NAMES if f in set(d["family"])] + sorted(set(d["family"]) - set(FAMILY_NAMES))
+    tf_opts = [t for t in TF_ORDER if t in set(d["tf"])]
+    f1, f2, f3 = st.columns(3)
+    sel_f = f1.multiselect("ชุดสัญญาณ", fam_opts, default=fam_opts, format_func=lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}", key="sw_fam")
+    sel_t = f2.multiselect("กรอบเวลา", tf_opts, default=tf_opts, key="sw_tf")
+    min_n = f3.slider("ไม้อย่างน้อย", 10, 200, 30, key="sw_min_n")
+    t_ = d[d["family"].isin(sel_f) & d["tf"].isin(sel_t) & (d["n"] >= min_n)]
+    out = t_.sort_values("avgR", ascending=False).head(60).rename(columns={"name": "บอท", "tf": "กรอบ", "n": "ไม้", "net": "กำไร $"})
+    st.markdown("**60 อันดับแรก (เรียงตาม avgR)**")
+    st.dataframe(styled(out[["บอท", "ชุด", "กรอบ", "ไม้", "ชนะ %", "กำไร $", "avgR", "t"]], ["กำไร $", "avgR", "t"],
+                        {"ไม้": "{:,.0f}", "ชนะ %": "{:.0f}", "กำไร $": "{:+,.0f}", "avgR": "{:+.3f}", "t": "{:+.2f}"}),
+                 hide_index=True, width="stretch")
+
+
+def swarm_marginals(a: pd.DataFrame, tf_all: pd.DataFrame) -> None:
+    mfmt = {"ไม้": "{:,.0f}", "กำไร $": "{:+,.0f}", "avgR": "{:+.3f}", "บอท": "{:,.0f}"}
+
+    def show(t: pd.DataFrame) -> None:
+        st.dataframe(styled(t, ["กำไร $", "avgR"], mfmt), hide_index=True, width="stretch")
+    fams = ([f for f in FAMILY_NAMES if f in set(tf_all["family"])] + sorted(set(tf_all["family"]) - set(FAMILY_NAMES))) if len(tf_all) else []
+    pv, pn = swarm_tf_pivot(a, fams) if fams else (pd.DataFrame(), pd.DataFrame())
     if len(pv):
+        st.markdown("**ชุด × กรอบเวลา — avgR และจำนวนไม้ (นับทุกบอท)**")
         x, y = st.columns(2)
         x.caption("avgR")
-        x.dataframe(pv, use_container_width=True)
+        x.dataframe(styled(pv, list(pv.columns), {c: "{:+.3f}" for c in pv.columns}), width="stretch")
         y.caption("จำนวนไม้")
-        y.dataframe(pn, use_container_width=True)
-    st.markdown("**ตารางสรุปรายมิติ (avgR = ถ่วงน้ำหนักด้วยไม้ · 'บอท' = จำนวนตัวที่มีไม้)**")
+        y.dataframe(pn, width="stretch")
+    st.markdown("**สรุปรายมิติ** (avgR ถ่วงน้ำหนักด้วยไม้ · 'บอท' = จำนวนตัวที่มีไม้)")
     mf = st.selectbox("ชุดสำหรับตาราง 'ถือกี่แท่ง' และ 'ตัวกรอง'", fams, format_func=lambda f: f"{f} · {FAMILY_NAMES.get(f, f)}", key="sw_mfam") if fams else None
     if mf:
         h1, h2 = st.columns(2)
         h1.caption(f"ถือกี่แท่ง (fc = ปิด 18:00 UTC) — ชุด {mf}")
-        h1.dataframe(swarm_marginal(a, "hold", mf), hide_index=True, use_container_width=True)
+        with h1:
+            show(swarm_marginal(a, "hold", mf))
         h2.caption(f"ตัวกรองเทรนด์ (- = ไม่กรอง) — ชุด {mf}")
-        h2.dataframe(swarm_marginal(a, "flt", mf), hide_index=True, use_container_width=True)
+        with h2:
+            show(swarm_marginal(a, "flt", mf))
     ov = swarm_marginal(a, "mp", None, "ov:")
     if len(ov):
         st.caption("โปรไฟล์ออกไม้ (ทับทุกชุด) — s = SL, t = TP เท่าของ SL, r = trailing, l = ล็อกทุน")
-        st.dataframe(ov, hide_index=True, use_container_width=True)
+        show(ov)
     if (a["family"] == "lg").any():
         st.markdown(f"**ชุด lg · {FAMILY_NAMES['lg']} — ฝั่งไหน / ตัวกรองไหน / ออกแบบไหนได้ผล**")
         for dim, title in (("side", "ฝั่ง (B = BUY, S = SELL, A = ทั้งคู่)"), ("sl", "SL ($)"), ("tp", "TP ($)"), ("hold", "ออกไม้ (fc = ปิด 18:00 UTC, ตัวเลข = ถือกี่แท่ง)"), ("flt", "ตัวกรองเทรนด์ (- = ไม่กรอง)"), ("sig", "สัญญาณ")):
             t = swarm_marginal(a, dim, "lg")
             if len(t):
                 st.caption(title)
-                st.dataframe(t, hide_index=True, use_container_width=True)
+                show(t)
+
+
+def variants_tab() -> None:
+    """ฝูงบอทเสมือน (swarm.py): การ์ดสรุป -> กลุ่มเด่น/แย่ -> กรอบเวลา -> รายละเอียดในกล่องพับ (อันดับจาก swarm_stats top 40k, สรุปรายมิติจาก swarm_agg)"""
+    swarm_live_strip()
+    lv = load_swarm_live() or {}
+    docs, adocs = load_swarm_stats(), load_swarm_agg()
+    a = swarm_agg_df(adocs)
+    tf_all = a[a["dim"] == "tf"] if len(a) else a
+    swarm_headline(lv, tf_all)
+    if not docs and not adocs:
+        st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~30 วินาที)")
+        return
+    n_bots = int(tf_all["bots"].sum()) if len(tf_all) else 0
+    if len(tf_all):
+        st.caption(f"ยอดสะสมทั้งหมด: {int(tf_all['n'].sum()):,} ไม้ปิด · {usd(float(tf_all['net'].sum()))} · {n_bots:,} บอทที่เคยมีไม้")
+    if a.empty:
+        st.info("ยังไม่มีสรุปรายมิติ (swarm_agg)")
+    else:
+        swarm_best_worst(a)
+        swarm_tf_section(a)
+    with st.expander("อันดับบอทรายตัว (swarm_stats)"):
+        swarm_ranking(docs, n_bots)
+    if not a.empty:
+        with st.expander("ตารางสรุปรายมิติ / pivot ชุด × กรอบ"):
+            swarm_marginals(a, tf_all)
 
 
 @st.fragment(run_every="15s")
 def live() -> None:
     now = datetime.now(timezone.utc)
-    st.title("ทีมบอท XAUUSD (เดโม)")
-    st.caption("ดูข้อมูลอย่างเดียว · บอททดสอบแบบตรึงค่า (เดโมจริง): m15b (M15) · m30b (M30) · ลีก 48 ตัว (ไม้จริงบนเดโม) · ฝูงเสมือนหลังตัดตัวขาดทุน ~445,000 ตัว (paper) · "
-               "เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00")
+    st.markdown("### 📈 ทีมบอท XAUUSD (เดโม)")
+    st.caption("ดูข้อมูลอย่างเดียว · m15b / m30b (ตรึงค่า ทดสอบบนเดโม) · ลีก 48 ตัว (ไม้จริงบนเดโม) · ฝูงเสมือน (paper) · เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00 · รีเฟรชอัตโนมัติทุก 15 วินาที")
     t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
