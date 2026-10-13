@@ -810,6 +810,7 @@ def swarm_live_strip() -> None:
 def variants_tab() -> None:
     """ฝูงบอทเสมือน (swarm.py): ตารางอันดับจาก swarm_stats (top 40k) + สรุปรายมิติจาก swarm_agg (ทุกตัว) — ไม้ดิบอยู่ใน logs/swarm/trades.csv"""
     swarm_live_strip()
+    lv = load_swarm_live() or {}
     docs, adocs = load_swarm_stats(), load_swarm_agg()
     if not docs and not adocs:
         st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~30 วินาที)")
@@ -822,7 +823,13 @@ def variants_tab() -> None:
     c2.metric("กำไรเสมือนรวม", f"{tf_all['net'].sum():+,.0f} $" if len(tf_all) else "–")
     c3.metric("บอทที่มีไม้แล้ว", f"{n_bots:,}" if len(tf_all) else "–")
     line = luck_line(n_bots)
-    st.caption(f"ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) ~1,000,000 ตัว · อันดับด้านล่างแสดงเฉพาะบอทที่มีไม้ ≥ ค่าที่เลือก จาก 40,000 ตัวบนสุด (ตาม avgR) ที่เก็บไว้ — ตัวอื่นเห็นได้เฉพาะในตารางสรุปรายมิติ · "
+    pb = lv.get("prune") or {}
+    if pb.get("ts") and len(tf_all):
+        since_n, since_net = int(tf_all["n"].sum()) - int(pb.get("n", 0)), float(tf_all["net"].sum()) - float(pb.get("net", 0.0))
+        st.markdown(f"✂️ **ตัดฝูง {str(pb['ts'])[:16].replace('T', ' ')} UTC:** {int(pb.get('before', 0)):,} → {int(pb.get('after', 0)):,} ตัว · "
+                    f"ตั้งแต่ตัด ชุดที่เหลือปิดไป {since_n:,} ไม้ กำไรเสมือน {since_net:+,.0f} $ (ยอดตั้งต้น {int(pb.get('n', 0)):,} ไม้ {float(pb.get('net', 0.0)):+,.0f} $ รวมอยู่ในยอดรวมด้านบน) "
+                    f"· ตัวที่ถูกตัด: H1 H4, M1 (ยกเว้นชุด x) และ 22 คู่ ชุด×กรอบเวลาที่ขาดทุนทั้งสองวัน (swarm_prune.py)")
+    st.caption(f"ฝูงบอทเสมือน (paper, ไม่ส่งออเดอร์) {lv.get('variants', 0):,} ตัว (ตัดตัวที่ขาดทุนต่อเนื่องออกแล้ว) · อันดับด้านล่างแสดงเฉพาะบอทที่มีไม้ ≥ ค่าที่เลือก จาก 40,000 ตัวบนสุด (ตาม avgR) ที่เก็บไว้ — ตัวอื่นเห็นได้เฉพาะในตารางสรุปรายมิติ · "
                f"ระวัง: ลอง {max(n_bots, 2):,} ตัว ตัวดีสุดมักเป็นโชค — เส้น 'โชคล้วน' t ≈ √(2 ln N) = {line:.1f} ตัวที่ t ต่ำกว่านี้แยกจากโชคไม่ได้ (ประมาณคร่าวๆ) · "
                "โปรไฟล์ออกไม้ (_s1t2 _r2 ...) ใช้สัญญาณเข้าเหมือนต้นแบบ จึงไม่ใช่ตัวอิสระ · อัปเดตทุก ~30 วินาที")
     st.markdown("**อันดับบอท (เรียงตาม avgR) — 60 อันดับแรก**")
@@ -875,9 +882,9 @@ def variants_tab() -> None:
 def live() -> None:
     now = datetime.now(timezone.utc)
     st.title("ทีมบอท XAUUSD (เดโม)")
-    st.caption("ดูข้อมูลอย่างเดียว · บอททดสอบแบบตรึงค่า (เดโมจริง): m15b (M15) · m30b (M30) · ลีก 48 ตัว (ไม้จริงบนเดโม) · ฝูงเสมือน ~1,000,000 ตัว (paper) · "
+    st.caption("ดูข้อมูลอย่างเดียว · บอททดสอบแบบตรึงค่า (เดโมจริง): m15b (M15) · m30b (M30) · ลีก 48 ตัว (ไม้จริงบนเดโม) · ฝูงเสมือนหลังตัดตัวขาดทุน ~580,000 ตัว (paper) · "
                "เข้าไม้ใหม่ได้ทั้งวัน ยกเว้น 00:00-05:00")
-    t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน (ล้านตัว)", "ข่าว & ตลาด"])
+    t_status, t_trades, t_profit, t_pass, t_league, t_var, t_news = st.tabs(["สถานะบอท", "ไม้ & เหตุผล", "กราฟกำไร", "เกณฑ์ผ่าน", "ลีก 48 ตัว", "ฝูงเสมือน", "ข่าว & ตลาด"])
     with t_status:
         team_status_section(now)
     with t_trades:
