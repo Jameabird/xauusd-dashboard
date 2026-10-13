@@ -1009,6 +1009,52 @@ def swarm_marginals(a: pd.DataFrame, tf_all: pd.DataFrame) -> None:
                 show(t)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def load_swarm_daily() -> list[dict]:
+    """ยอดรายวัน (UTC) ที่ swarm.py เก็บ: ทั้งหมด / ฝั่ง BUY-SELL / กำไรจากการบังคับปิดตอนหยุดฝูง / ชุดปิดกำไรเร็ว / จำนวนไม้ที่หักต้นทุน"""
+    return list(db.swarm_daily.find({}).sort("_id", DESCENDING).limit(30))
+
+
+def swarm_daily_section(docs: list[dict]) -> None:
+    """ผลรายวันแบบแยกยอดไม่ให้ปนกัน: กำไรจากการบังคับปิด (ตอนหยุดฝูง/รีสตาร์ต) แยกออกจากกำไรที่ปิดตามกติกาปกติ"""
+    if not docs:
+        st.caption("ยังไม่มียอดรายวัน (swarm_daily) — ฝูงส่งหลังรีสตาร์ตด้วยเวอร์ชันใหม่")
+        return
+    rows = []
+    for d in docs:
+        n = int(d.get("n", 0) or 0)
+        net, forced = float(d.get("net", 0) or 0), float(d.get("forced_net", 0) or 0)
+        pt_n = int(d.get("pt_n", 0) or 0)
+        cost = int(d.get("cost_n", 0) or 0)
+        rows.append({"วัน (UTC)": d["_id"], "ไม้ปิด": n, "กำไรรวม $": net, "ปิดตามกติกา $": net - forced, "บังคับปิดตอนหยุดฝูง $": forced,
+                     "BUY $": float(d.get("buy_net", 0) or 0), "SELL $": float(d.get("sell_net", 0) or 0),
+                     "ชุดปิดกำไรเร็ว $": float(d.get("pt_net", 0) or 0) if pt_n else None,
+                     "หักต้นทุน": "ทั้งวัน" if n and cost >= n else ("บางส่วน" if cost else "ไม่หัก")})
+    df = pd.DataFrame(rows)
+    st.markdown("**ผลรายวัน (แยกกำไรจากการบังคับปิด)**")
+    st.caption("ดูคอลัมน์ 'ปิดตามกติกา' เป็นหลัก — 'บังคับปิดตอนหยุดฝูง' คือไม้ที่ถูกปิดทั้งหมดตอนหยุด/รีสตาร์ตฝูง (ตัดวงจรถือไม้ให้สั้นลง ไม่ใช่ผลของกติกาออกไม้) · "
+               "'หักต้นทุน': ไม้ก่อนเริ่มหักต้นทุน ($0.34/ไม้) ไม่ได้หัก จึงเทียบข้ามวันที่ต่างกันตรง ๆ ไม่ได้")
+    num = [c for c in df.columns if c.endswith("$")]
+    st.dataframe(df.style.map(lambda v: "color:#2ca02c" if isinstance(v, (int, float)) and v > 0 else ("color:#d62728" if isinstance(v, (int, float)) and v < 0 else ""), subset=num)
+                 .format({c: "{:+,.0f}" for c in num}, na_rep="–"), hide_index=True, width="stretch")
+
+
+def swarm_side_section(lv: dict) -> None:
+    """สัดส่วนฝั่งของไม้เสมือนที่เปิดอยู่ + กำไรลอยแยกฝั่ง — เห็นว่าฝูงเสี่ยงทิศเดียวมากแค่ไหน"""
+    nb, ns = int(lv.get("open_buy", 0) or 0), int(lv.get("open_sell", 0) or 0)
+    if nb + ns == 0:
+        return
+    fb, fs = lv.get("floating_buy"), lv.get("floating_sell")
+    st.markdown("**ไม้ที่เปิดอยู่: BUY vs SELL**")
+    c = st.columns(4)
+    c[0].metric("BUY เปิดอยู่", f"{nb:,}", f"{nb / (nb + ns) * 100:.0f}%", delta_color="off", delta_arrow="off")
+    c[1].metric("SELL เปิดอยู่", f"{ns:,}", f"{ns / (nb + ns) * 100:.0f}%", delta_color="off", delta_arrow="off")
+    c[2].metric("กำไรลอย BUY", usd(fb) if fb is not None else "–")
+    c[3].metric("กำไรลอย SELL", usd(fs) if fs is not None else "–")
+    if max(nb, ns) / (nb + ns) >= 0.75:
+        st.warning(f"⚠️ ไม้เปิดอยู่เอนไปฝั่ง {'SELL' if ns > nb else 'BUY'} {max(nb, ns) / (nb + ns) * 100:.0f}% — ผลรวมขึ้นกับทิศตลาดมาก ไม่ใช่ความแม่นของสัญญาณอย่างเดียว")
+
+
 def variants_tab() -> None:
     """ฝูงบอทเสมือน (swarm.py): การ์ดสรุป -> กลุ่มเด่น/แย่ -> กรอบเวลา -> รายละเอียดในกล่องพับ (อันดับจาก swarm_stats top 40k, สรุปรายมิติจาก swarm_agg)"""
     swarm_live_strip()
@@ -1017,6 +1063,8 @@ def variants_tab() -> None:
     a = swarm_agg_df(adocs)
     tf_all = a[a["dim"] == "tf"] if len(a) else a
     swarm_headline(lv, tf_all)
+    swarm_side_section(lv)
+    swarm_daily_section(load_swarm_daily())
     if not docs and not adocs:
         st.info("ฝูงบอทเสมือนยังไม่มีไม้ที่ปิด — รอสัญญาณ (swarm.py ส่งสถิติทุก ~30 วินาที)")
         return
